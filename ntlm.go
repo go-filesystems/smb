@@ -7,6 +7,7 @@ import (
 	"crypto/hmac"
 	"crypto/md5"
 	"crypto/rand"
+	"crypto/rc4"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -188,7 +189,23 @@ func (c *challenge) verify(a *authMessage, password string) ([]byte, bool) {
 	// The session base key is HMAC-MD5 of the proof under the same key.
 	base := hmac.New(md5.New, key)
 	base.Write(proof)
-	return base.Sum(nil), true
+	sessionKey := base.Sum(nil)
+
+	// KEY EXCHANGE. When the client asks for it -- macOS and Windows both do
+	// -- it invents the session key itself, encrypts it with RC4 under the
+	// base key, and sends it along. A server that signs with the base key
+	// instead signs with a key the client is not using, and every signature
+	// it produces is rejected.
+	if a.flags&ntlmNegotiateKeyExchange != 0 && len(a.sessionKeyEnc) == 16 {
+		c, err := rc4.NewCipher(sessionKey)
+		if err != nil {
+			return nil, false
+		}
+		exported := make([]byte, 16)
+		c.XORKeyStream(exported, a.sessionKeyEnc)
+		sessionKey = exported
+	}
+	return sessionKey, true
 }
 
 // ntowfv2 is HMAC_MD5(MD4(UTF16LE(password)), UTF16LE(upper(user) + domain)).

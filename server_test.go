@@ -166,7 +166,9 @@ func TestTheLegacyGreetingIsAnswered(t *testing.T) {
 // what came after.
 func TestADialectWeDoNotSpeak(t *testing.T) {
 	c := &conn{srv: New()}
-	out, err := c.dispatch(negotiateRequest(dialect202, dialect300))
+	// 2.0.2 is for Vista and 3.1.1 changes the shape of the exchange: neither
+	// is spoken here.
+	out, err := c.dispatch(negotiateRequest(dialect202, dialect311))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,15 +177,27 @@ func TestADialectWeDoNotSpeak(t *testing.T) {
 		t.Errorf("status = %#x, want NOT_SUPPORTED", h.status)
 	}
 	// …and one we do speak is.
-	out, err = c.dispatch(negotiateRequest(dialect202, dialect210, dialect311))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := dialectOf(out); got != dialect210 {
-		t.Errorf("dialect = %#04x, want %#04x", got, dialect210)
-	}
-	if c.dialect != dialect210 {
-		t.Errorf("the connection remembers %#04x", c.dialect)
+	// …and the best of what both sides speak is chosen: 3.0.2 over 3.0 over
+	// 2.1, whatever order the client listed them in.
+	for _, tc := range []struct {
+		offered []uint16
+		want    uint16
+	}{
+		{[]uint16{dialect202, dialect210, dialect311}, dialect210},
+		{[]uint16{dialect210, dialect300}, dialect300},
+		{[]uint16{dialect202, dialect210, dialect300, dialect302, dialect311}, dialect302},
+	} {
+		c := &conn{srv: New()}
+		out, err := c.dispatch(negotiateRequest(tc.offered...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := dialectOf(out); got != tc.want {
+			t.Errorf("offered %#04x, chose %#04x, want %#04x", tc.offered, got, tc.want)
+		}
+		if c.dialect != tc.want {
+			t.Errorf("the connection remembers %#04x", c.dialect)
+		}
 	}
 	if _, err := c.dispatch(shortMessage(cmdNegotiate)); err == nil {
 		t.Error("a NEGOTIATE too short to read was accepted")
@@ -194,7 +208,7 @@ func TestADialectWeDoNotSpeak(t *testing.T) {
 // back instead of waiting for a reply that never comes.
 func TestWhatIsNotImplementedSaysSo(t *testing.T) {
 	c := newConn(New(), nil)
-	for _, cmd := range []command{cmdLock, cmdIoctl, cmdChangeNotify, cmdOplockBreak} {
+	for _, cmd := range []command{cmdLock, cmdChangeNotify, cmdOplockBreak} {
 		out, err := c.dispatch(requestOf(cmd, nil))
 		if err != nil {
 			t.Fatalf("%v: %v", cmd, err)

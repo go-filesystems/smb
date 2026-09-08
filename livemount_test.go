@@ -67,10 +67,22 @@ func TestLiveMount(t *testing.T) {
 	if err := os.Mkdir(mnt, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	opts := fmt.Sprintf("port=%d,username=alice,password=hunter2,vers=2.1,uid=%d,gid=%d",
+	// No dialect is named: the kernel offers what it has and this server picks
+	// the best it speaks, which is what a person typing `mount -t cifs` gets.
+	// If that fails, 3.0 is asked for explicitly -- and the test says which
+	// one worked, because "it mounts when told exactly what to do" is a
+	// weaker result than "it mounts".
+	base := fmt.Sprintf("port=%d,username=alice,password=hunter2,uid=%d,gid=%d",
 		port, os.Getuid(), os.Getgid())
-	if out, err := run("mount", "-t", "cifs", "//127.0.0.1/disk", mnt, "-o", opts); err != nil {
-		fatal(t, "mounting with %q: %v\n%s", opts, err, out)
+	out, err := run("mount", "-t", "cifs", "//127.0.0.1/disk", mnt, "-o", base)
+	if err != nil {
+		t.Logf("mounting without naming a dialect failed, trying 3.0: %v\n%s", err, out)
+		if out, err = run("mount", "-t", "cifs", "//127.0.0.1/disk", mnt, "-o", base+",vers=3.0"); err != nil {
+			fatal(t, "mounting with %q: %v\n%s", base, err, out)
+		}
+	}
+	if out, err := run("sh", "-c", "mount | grep cifs"); err == nil {
+		t.Logf("mounted: %s", strings.TrimSpace(out))
 	}
 	defer run("umount", mnt)
 
