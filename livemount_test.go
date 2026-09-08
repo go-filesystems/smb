@@ -70,7 +70,17 @@ func TestLiveMount(t *testing.T) {
 	opts := fmt.Sprintf("port=%d,username=alice,password=hunter2,vers=2.1,uid=%d,gid=%d",
 		port, os.Getuid(), os.Getgid())
 	if out, err := run("mount", "-t", "cifs", "//127.0.0.1/disk", mnt, "-o", opts); err != nil {
-		t.Fatalf("mounting: %v\n%s", err, out)
+		// mount.cifs says "Invalid argument" for a dozen different reasons and
+		// puts the actual one in the kernel log. Printing it here is the
+		// difference between a lane that says what is wrong and one that says
+		// only that something is.
+		kernel, _ := run("dmesg", "--ctime")
+		lines := strings.Split(strings.TrimSpace(kernel), "\n")
+		if len(lines) > 15 {
+			lines = lines[len(lines)-15:]
+		}
+		t.Fatalf("mounting with %q: %v\n%s\n--- the kernel's own account ---\n%s",
+			opts, err, out, strings.Join(lines, "\n"))
 	}
 	defer run("umount", mnt)
 
