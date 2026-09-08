@@ -56,7 +56,25 @@ verified**: signing is implemented because Windows 11 requires it, and
 it is missing — but neither has been put to a real Windows client here. Two
 operating systems have mounted this; the third is a claim nobody has checked.
 
-## Serving one
+## Serving one from the command line
+
+```sh
+go run github.com/go-filesystems/smb/cmd/smbserve@latest \
+    -image disk.img -user alice -password-file pw
+```
+
+```
+disk.img (fat32) on \\127.0.0.1:4445\disk
+  macOS:  mount_smbfs //alice@127.0.0.1:4445/disk /Volumes/disk
+  Linux:  sudo mount -t cifs //127.0.0.1/disk /mnt -o port=4445,username=alice
+```
+
+The filesystem inside the image is worked out rather than declared:
+[`go-filesystems/detect`](https://github.com/go-filesystems/detect) reads the
+magic. The password comes from a **file**, never a flag: an argument is visible
+in the process list to every user on the machine.
+
+## Serving one from Go
 
 ```go
 fs, err := fat32.Open("disk.img", -1)

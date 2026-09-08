@@ -146,3 +146,26 @@ jobs:
             echo "::error::the live mount test skipped; this lane proves nothing"
             exit 1
           fi
+
+  # The command is a module of its own, so nothing above builds it: the root
+  # module's `go build ./...` stops at its go.mod. It pulls in the drivers,
+  # which is exactly why it is separate -- and exactly why it needs a lane.
+  command:
+    name: smbserve (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          check-latest: true
+          cache: true
+          cache-dependency-path: cmd/smbserve/go.sum
+      - run: go vet ./...
+        working-directory: cmd/smbserve
+      - run: go build ./...
+        working-directory: cmd/smbserve
