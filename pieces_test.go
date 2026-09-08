@@ -131,7 +131,9 @@ func TestDirectoryEntryLayout(t *testing.T) {
 	}{
 		{infoDirectoryIDBoth, 104},
 		{infoDirectoryBoth, 94},
+		{infoDirectoryIDFull, 80}, // what the Linux kernel's client asks for
 		{infoDirectoryFull, 68},
+		{infoDirectoryPlain, 64},
 		{infoDirectoryNames, 12},
 	} {
 		b := encodeDirEntry(tc.class, e, false)

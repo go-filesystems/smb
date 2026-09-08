@@ -15,10 +15,12 @@ import (
 // File information classes a directory listing can be asked for. A client
 // picks one; these three are what real clients ask for.
 const (
-	infoDirectoryBoth   uint8 = 3  // FileBothDirectoryInformation
+	infoDirectoryPlain  uint8 = 1  // FileDirectoryInformation
 	infoDirectoryFull   uint8 = 2  // FileFullDirectoryInformation
+	infoDirectoryBoth   uint8 = 3  // FileBothDirectoryInformation
 	infoDirectoryNames  uint8 = 12 // FileNamesInformation
 	infoDirectoryIDBoth uint8 = 37 // FileIdBothDirectoryInformation
+	infoDirectoryIDFull uint8 = 38 // FileIdFullDirectoryInformation
 )
 
 // QUERY_DIRECTORY flags.
@@ -177,14 +179,26 @@ func matchSMB(pattern, name string) bool {
 // this server does not write returns nil, and the caller refuses by name.
 func encodeDirEntry(class uint8, e dirEntry, readOnly bool) []byte {
 	name := utf16le(e.name)
+	// Every class is the same fields in the same order, differing only in what
+	// is bolted on after the name length -- which is why the layout below is
+	// one path with the name at a different offset.
+	//
+	// Which class matters: the Linux kernel's client asks for
+	// FileIdFullDirectoryInformation and NOTHING else, so a server that writes
+	// only the two macOS uses answers INVALID_INFO_CLASS and the mount reports
+	// EIO on its first readdir, with nothing in the kernel log.
 	var fixed int
 	switch class {
 	case infoDirectoryIDBoth:
 		fixed = 104
 	case infoDirectoryBoth:
 		fixed = 94
+	case infoDirectoryIDFull:
+		fixed = 80
 	case infoDirectoryFull:
 		fixed = 68
+	case infoDirectoryPlain:
+		fixed = 64
 	case infoDirectoryNames:
 		fixed = 12
 	default:
@@ -210,13 +224,13 @@ func encodeDirEntry(class uint8, e dirEntry, readOnly bool) []byte {
 	binary.LittleEndian.PutUint32(b[56:], attributesOf(e.st, readOnly))
 	binary.LittleEndian.PutUint32(b[60:], uint32(len(name)))
 	switch class {
-	case infoDirectoryFull:
-		copy(b[68:], name)
-	case infoDirectoryBoth:
-		copy(b[94:], name) // ShortNameLength stays zero: there are no 8.3 names here
+	case infoDirectoryIDFull:
+		binary.LittleEndian.PutUint64(b[72:], e.st.Inode())
 	case infoDirectoryIDBoth:
 		binary.LittleEndian.PutUint64(b[96:], e.st.Inode())
-		copy(b[104:], name)
 	}
+	// ShortNameLength, where the class has one, stays zero: there are no 8.3
+	// names here and a client asked to display one would show blanks.
+	copy(b[fixed:], name)
 	return b
 }
