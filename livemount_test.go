@@ -1,0 +1,124 @@
+//go:build livemount
+
+package smb_test
+
+import (
+	"bytes"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	fssmb "github.com/go-filesystems/smb"
+)
+
+// The judge that is not a library: the Linux kernel's own SMB client, the one
+// behind `mount -t cifs`. A foreign Go client runs in every other lane; this
+// one is an operating system, and it asks for things no library bothers with
+// -- chained requests, credits, the information classes a stat needs.
+//
+// It is behind a build tag because it needs root to mount and a kernel module
+// that a macOS or Windows runner does not have. CI runs it on Linux.
+//
+// vers=2.1 is not optional: mount.cifs defaults to 3.1.1, and this server
+// speaks 2.1. Saying so here is better than a lane that fails with "the
+// server does not support the requested dialect" and reads as a bug.
+func TestLiveMount(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("mount -t cifs is Linux's")
+	}
+	if os.Geteuid() != 0 {
+		if _, err := exec.LookPath("sudo"); err != nil {
+			t.Skip("mounting needs root, and there is no sudo here")
+		}
+	}
+
+	mem := newMemFS(true)
+	body := bytes.Repeat([]byte("go-filesystems/smb "), 3000) // 57 kB: several reads
+	if err := mem.WriteFile("/greeting.txt", body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.MkDir("/sub", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.WriteFile("/sub/inner.txt", []byte("inside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := fssmb.New()
+	srv.AddUser("alice", "hunter2")
+	if err := srv.Share("disk", mem); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve(ln)
+	defer srv.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	dir := t.TempDir()
+	mnt := filepath.Join(dir, "mnt")
+	if err := os.Mkdir(mnt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	opts := fmt.Sprintf("port=%d,username=alice,password=hunter2,vers=2.1,uid=%d,gid=%d",
+		port, os.Getuid(), os.Getgid())
+	if out, err := run("mount", "-t", "cifs", "//127.0.0.1/disk", mnt, "-o", opts); err != nil {
+		t.Fatalf("mounting: %v\n%s", err, out)
+	}
+	defer run("umount", mnt)
+
+	// Everything a person does with a mount.
+	entries, err := os.ReadDir(mnt)
+	if err != nil {
+		t.Fatalf("listing the mount: %v", err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if got := strings.Join(names, ","); got != "greeting.txt,sub" {
+		t.Errorf("the mount lists %q", got)
+	}
+
+	got, err := os.ReadFile(filepath.Join(mnt, "greeting.txt"))
+	if err != nil {
+		t.Fatalf("reading through the mount: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("read %d bytes of %d, and they differ", len(got), len(body))
+	}
+	st, err := os.Stat(filepath.Join(mnt, "greeting.txt"))
+	if err != nil || st.Size() != int64(len(body)) {
+		t.Errorf("stat says %v bytes (%v), want %d", st, err, len(body))
+	}
+	if inner, err := os.ReadFile(filepath.Join(mnt, "sub", "inner.txt")); err != nil || string(inner) != "inside" {
+		t.Errorf("the file in the subdirectory read %q, %v", inner, err)
+	}
+
+	// …and the other direction, checked in the filesystem underneath rather
+	// than through the mount that wrote it.
+	written := []byte("written by the kernel client")
+	if err := os.WriteFile(filepath.Join(mnt, "fromclient.txt"), written, 0o644); err != nil {
+		t.Fatalf("writing through the mount: %v", err)
+	}
+	if inDriver, err := mem.ReadFile("/fromclient.txt"); err != nil || !bytes.Equal(inDriver, written) {
+		t.Errorf("the filesystem holds %q (%v), not what the client wrote", inDriver, err)
+	}
+}
+
+// run executes a command as root, through sudo when it has to.
+func run(name string, args ...string) (string, error) {
+	if os.Geteuid() != 0 {
+		args = append([]string{name}, args...)
+		name = "sudo"
+	}
+	out, err := exec.Command(name, args...).CombinedOutput()
+	return string(out), err
+}

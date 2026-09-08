@@ -1,0 +1,497 @@
+package smb
+
+import (
+	"encoding/binary"
+	"os"
+	"strings"
+	"testing"
+
+	filesystem "github.com/go-filesystems/interface"
+)
+
+// tinyFS is the smallest filesystem that can be opened, listed and written:
+// one directory, one file, and errors for everything else.
+type tinyFS struct {
+	body    []byte
+	failing bool
+}
+
+func (f *tinyFS) Close() error  { return nil }
+func (f *tinyFS) Label() string { return "TINY" }
+func (f *tinyFS) ReadFile(p string) ([]byte, error) {
+	if f.failing {
+		return nil, os.ErrPermission
+	}
+	if p == "/file.txt" {
+		return f.body, nil
+	}
+	return nil, os.ErrNotExist
+}
+func (f *tinyFS) WriteFile(p string, d []byte, _ os.FileMode) error {
+	if f.failing {
+		return os.ErrPermission
+	}
+	if p == "/file.txt" {
+		f.body = append([]byte(nil), d...)
+		return nil
+	}
+	return os.ErrPermission
+}
+func (f *tinyFS) ListDir(p string) ([]filesystem.DirEntry, error) {
+	if p != "/" {
+		return nil, os.ErrNotExist
+	}
+	return []filesystem.DirEntry{filesystem.NewDirEntry(2, "file.txt", 1)}, nil
+}
+func (f *tinyFS) Stat(p string) (filesystem.Stat, error) {
+	switch p {
+	case "/":
+		return filesystem.NewStat(0o040755, 0, 1), nil
+	case "/file.txt":
+		return filesystem.NewStat(0o100644, uint64(len(f.body)), 2), nil
+	}
+	return nil, os.ErrNotExist
+}
+func (f *tinyFS) MkDir(string, os.FileMode) error { return os.ErrPermission }
+func (f *tinyFS) DeleteFile(string) error         { return nil }
+func (f *tinyFS) DeleteDir(string) error          { return nil }
+func (f *tinyFS) Rename(string, string) error {
+	if f.failing {
+		return os.ErrPermission
+	}
+	return nil
+}
+func (f *tinyFS) ReadLink(string) (string, error) { return "", os.ErrInvalid }
+
+// opened builds a connection with one share and one handle on it, which is
+// what every command below needs and none of them is about.
+func opened(t *testing.T, fsys filesystem.Filesystem, path string, ro bool) (*conn, *openFile) {
+	t.Helper()
+	c := newConn(New(), nil)
+	sh := &share{name: "disk", fsys: fsys, ro: ro}
+	c.trees[1] = sh
+	st, err := fsys.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	of := &openFile{path: path, share: sh, dir: isDir(st)}
+	of.id[0] = 1
+	c.files[of.id] = of
+	c.lastFile = of.id
+	return c, of
+}
+
+func request(cmd command, tree uint32, body []byte) []byte {
+	h := responseTo(header{command: cmd, treeID: tree}, statusSuccess)
+	binary.LittleEndian.PutUint32(h[offFlags:], 0)
+	return append(h, body...)
+}
+
+func statusOf(t *testing.T, out []byte) uint32 {
+	t.Helper()
+	h, err := parseHeader(out)
+	if err != nil {
+		t.Fatalf("the reply is not a message: %v", err)
+	}
+	return h.status
+}
+
+// Every information class a client asks about a file, and the refusal for one
+// this server does not write.
+func TestQueryInfoClasses(t *testing.T) {
+	fs := &tinyFS{body: []byte("hello")}
+	c, of := opened(t, fs, "/file.txt", false)
+
+	ask := func(infoType, class uint8) []byte {
+		body := make([]byte, 40)
+		body[2], body[3] = infoType, class
+		copy(body[24:], of.id[:])
+		out, err := c.dispatch(request(cmdQueryInfo, 1, body))
+		if err != nil {
+			t.Fatalf("type %d class %d: %v", infoType, class, err)
+		}
+		return out
+	}
+	for _, class := range []uint8{
+		fileBasicInformation, fileStandardInformation, fileInternalInformation,
+		fileEaInformation, fileAccessInformation, fileNameInformation,
+		fileAlignmentInformation, filePositionInformation,
+		fileNetworkOpenInformation, fileStreamInformation, fileAllInformation,
+	} {
+		out := ask(infoTypeFile, class)
+		if st := statusOf(t, out); st != statusSuccess {
+			t.Errorf("file class %d answered %#x", class, st)
+		}
+		if n := binary.LittleEndian.Uint32(out[headerLen+4:]); n == 0 && class != fileStreamInformation {
+			t.Errorf("file class %d answered with nothing in it", class)
+		}
+	}
+	for _, class := range []uint8{
+		fsVolumeInformation, fsSizeInformation, fsFullSizeInformation,
+		fsDeviceInformation, fsAttributeInformation,
+	} {
+		if st := statusOf(t, ask(infoTypeFilesystem, class)); st != statusSuccess {
+			t.Errorf("filesystem class %d answered %#x", class, st)
+		}
+	}
+	if st := statusOf(t, ask(infoTypeFile, 99)); st != statusInvalidInfoClass {
+		t.Errorf("an unknown file class answered %#x", st)
+	}
+	if st := statusOf(t, ask(infoTypeSecurity, 0)); st != statusNotSupported {
+		t.Errorf("a security descriptor answered %#x, want NOT_SUPPORTED", st)
+	}
+
+	// A directory's stream information is empty rather than an error, and its
+	// standard information says it is one.
+	cd, dirOf := opened(t, fs, "/", false)
+	dirBody := make([]byte, 40)
+	dirBody[2], dirBody[3] = infoTypeFile, fileStandardInformation
+	copy(dirBody[24:], dirOf.id[:])
+	out, err := cd.dispatch(request(cmdQueryInfo, 1, dirBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out[headerLen+8+21] != 1 {
+		t.Error("a directory's standard information does not say it is one")
+	}
+}
+
+// Deleting, renaming and truncating are all SET_INFO: SMB2 has no command for
+// any of the three.
+func TestSetInfoIsHowThingsChange(t *testing.T) {
+	fs := &tinyFS{body: []byte("hello")}
+	c, of := opened(t, fs, "/file.txt", false)
+
+	set := func(class uint8, in []byte) uint32 {
+		body := make([]byte, 32)
+		body[2], body[3] = infoTypeFile, class
+		binary.LittleEndian.PutUint32(body[4:], uint32(len(in)))
+		binary.LittleEndian.PutUint16(body[8:], uint16(headerLen+32))
+		copy(body[16:], of.id[:])
+		out, err := c.dispatch(request(cmdSetInfo, 1, append(body, in...)))
+		if err != nil {
+			t.Fatalf("class %d: %v", class, err)
+		}
+		return statusOf(t, out)
+	}
+
+	if st := set(fileDispositionInformation, []byte{1}); st != statusSuccess {
+		t.Errorf("marking delete-on-close answered %#x", st)
+	}
+	if !of.deleteOnClose {
+		t.Error("the handle was not marked delete-on-close")
+	}
+
+	rename := make([]byte, 20)
+	name := utf16le(`renamed.txt`)
+	binary.LittleEndian.PutUint32(rename[16:], uint32(len(name)))
+	if st := set(fileRenameInformation, append(rename, name...)); st != statusSuccess {
+		t.Errorf("renaming answered %#x", st)
+	}
+	if of.path != "/renamed.txt" {
+		t.Errorf("the handle still calls itself %q", of.path)
+	}
+	of.path = "/file.txt"
+
+	size := make([]byte, 8)
+	binary.LittleEndian.PutUint64(size, 3)
+	if st := set(fileEndOfFileInformation, size); st != statusSuccess {
+		t.Errorf("truncating answered %#x", st)
+	}
+	if string(fs.body) != "hel" {
+		t.Errorf("the file holds %q after being truncated to 3", fs.body)
+	}
+
+	// Timestamps and attributes are accepted and dropped: a client sets them
+	// at the end of every copy, and refusing there turns a good copy into a
+	// reported failure.
+	if st := set(fileBasicInformationSet, make([]byte, 40)); st != statusSuccess {
+		t.Errorf("setting times answered %#x", st)
+	}
+	if st := set(99, nil); st != statusInvalidInfoClass {
+		t.Errorf("an unknown class answered %#x", st)
+	}
+	for _, class := range []uint8{fileDispositionInformation, fileRenameInformation, fileEndOfFileInformation} {
+		if st := set(class, nil); st != statusInvalidParameter {
+			t.Errorf("class %d with an empty payload answered %#x", class, st)
+		}
+	}
+
+	// A share exported read-only refuses all of it, before touching anything.
+	ro, roOf := opened(t, fs, "/file.txt", true)
+	roBody := make([]byte, 32)
+	roBody[2], roBody[3] = infoTypeFile, fileDispositionInformation
+	copy(roBody[16:], roOf.id[:])
+	out, err := ro.dispatch(request(cmdSetInfo, 1, roBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := statusOf(t, out); st != statusMediaWriteProtected {
+		t.Errorf("a read-only share answered %#x", st)
+	}
+}
+
+// The dispositions: what to do about a file that is or is not there.
+func TestCreateDispositions(t *testing.T) {
+	fs := &tinyFS{body: []byte("hello")}
+	c, _ := opened(t, fs, "/", false)
+
+	create := func(name string, disp, opts uint32) uint32 {
+		n := utf16le(name)
+		body := make([]byte, 56)
+		binary.LittleEndian.PutUint32(body[36:], disp)
+		binary.LittleEndian.PutUint32(body[40:], opts)
+		binary.LittleEndian.PutUint16(body[44:], uint16(headerLen+56))
+		binary.LittleEndian.PutUint16(body[46:], uint16(len(n)))
+		out, err := c.dispatch(request(cmdCreate, 1, append(body, n...)))
+		if err != nil {
+			t.Fatalf("%q: %v", name, err)
+		}
+		return statusOf(t, out)
+	}
+
+	if st := create("file.txt", dispOpen, 0); st != statusSuccess {
+		t.Errorf("opening a file that is there answered %#x", st)
+	}
+	if st := create("file.txt", dispCreate, 0); st != statusObjectNameCollision {
+		t.Errorf("creating a file that is there answered %#x", st)
+	}
+	if st := create("missing.txt", dispOpen, 0); st != statusObjectNameNotFound {
+		t.Errorf("opening a file that is not there answered %#x", st)
+	}
+	if st := create("file.txt", dispOverwriteIf, 0); st != statusSuccess {
+		t.Errorf("overwriting answered %#x", st)
+	}
+	if len(fs.body) != 0 {
+		t.Errorf("overwriting left %d bytes", len(fs.body))
+	}
+	// Asking for a directory and finding a file, and the other way round.
+	if st := create("file.txt", dispOpen, optDirectoryFile); st != statusNotADirectory {
+		t.Errorf("opening a file as a directory answered %#x", st)
+	}
+	if st := create("", dispOpen, optNonDirectoryFile); st != statusFileIsADirectory {
+		t.Errorf("opening the root as a file answered %#x", st)
+	}
+	// A path that is not one.
+	if st := create(`file.txt:stream`, dispOpen, 0); st != statusObjectNameNotFound {
+		t.Errorf("a stream name answered %#x", st)
+	}
+	// A read-only share refuses anything that would write, before looking.
+	ro, _ := opened(t, fs, "/", true)
+	n := utf16le("new.txt")
+	body := make([]byte, 56)
+	binary.LittleEndian.PutUint32(body[36:], dispCreate)
+	binary.LittleEndian.PutUint16(body[44:], uint16(headerLen+56))
+	binary.LittleEndian.PutUint16(body[46:], uint16(len(n)))
+	out, err := ro.dispatch(request(cmdCreate, 1, append(body, n...)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := statusOf(t, out); st != statusMediaWriteProtected {
+		t.Errorf("creating on a read-only share answered %#x", st)
+	}
+}
+
+// Reads and writes addressed to the wrong kind of thing.
+func TestReadAndWriteRefusals(t *testing.T) {
+	fs := &tinyFS{body: []byte("hello")}
+	c, dirOf := opened(t, fs, "/", false)
+
+	body := make([]byte, 48)
+	binary.LittleEndian.PutUint32(body[4:], 10)
+	copy(body[16:], dirOf.id[:])
+	out, err := c.dispatch(request(cmdRead, 1, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := statusOf(t, out); st != statusInvalidDeviceRequest {
+		t.Errorf("reading a directory answered %#x", st)
+	}
+	if out, err = c.dispatch(request(cmdWrite, 1, body)); err != nil {
+		t.Fatal(err)
+	}
+	if st := statusOf(t, out); st != statusInvalidDeviceRequest {
+		t.Errorf("writing to a directory answered %#x", st)
+	}
+
+	// Reading past the end says END_OF_FILE rather than succeeding with
+	// nothing, which a client reads as "keep going".
+	cf, fileOf := opened(t, fs, "/file.txt", false)
+	rb := make([]byte, 48)
+	binary.LittleEndian.PutUint32(rb[4:], 10)
+	binary.LittleEndian.PutUint64(rb[8:], 500)
+	copy(rb[16:], fileOf.id[:])
+	if out, err = cf.dispatch(request(cmdRead, 1, rb)); err != nil {
+		t.Fatal(err)
+	}
+	if st := statusOf(t, out); st != statusEndOfFile {
+		t.Errorf("reading past the end answered %#x", st)
+	}
+	// A negative offset is refused rather than wrapped.
+	binary.LittleEndian.PutUint64(rb[8:], 1<<63)
+	if out, err = cf.dispatch(request(cmdRead, 1, rb)); err != nil {
+		t.Fatal(err)
+	}
+	if st := statusOf(t, out); st != statusInvalidParameter {
+		t.Errorf("a negative offset answered %#x", st)
+	}
+	// A driver that refuses is reported, not retried.
+	fs.failing = true
+	binary.LittleEndian.PutUint64(rb[8:], 0)
+	if out, err = cf.dispatch(request(cmdRead, 1, rb)); err != nil {
+		t.Fatal(err)
+	}
+	if st := statusOf(t, out); st != statusAccessDenied {
+		t.Errorf("a driver refusing a read answered %#x", st)
+	}
+}
+
+// A listing is read in pages, and the end of it is NO_MORE_FILES.
+func TestListingPagesAndEnds(t *testing.T) {
+	fs := &tinyFS{body: []byte("hello")}
+	c, of := opened(t, fs, "/", false)
+
+	page := func(class uint8, flags uint8, max uint32, pattern string) []byte {
+		p := utf16le(pattern)
+		body := make([]byte, 32)
+		body[2], body[3] = class, flags
+		copy(body[8:], of.id[:])
+		binary.LittleEndian.PutUint16(body[24:], uint16(headerLen+32))
+		binary.LittleEndian.PutUint16(body[26:], uint16(len(p)))
+		binary.LittleEndian.PutUint32(body[28:], max)
+		out, err := c.dispatch(request(cmdQueryDirectory, 1, append(body, p...)))
+		if err != nil {
+			t.Fatalf("listing: %v", err)
+		}
+		return out
+	}
+	out := page(infoDirectoryIDBoth, 0, 4096, "*")
+	if st := statusOf(t, out); st != statusSuccess {
+		t.Fatalf("the first page answered %#x", st)
+	}
+	// "." and ".." are there, because a client that does not see them
+	// concludes it is not looking at a directory.
+	if n := binary.LittleEndian.Uint32(out[headerLen+4:]); n < 3*104 {
+		t.Errorf("the page is %d bytes: too small for . , .. and the file", n)
+	}
+	if st := statusOf(t, page(infoDirectoryIDBoth, 0, 4096, "*")); st != statusNoMoreFiles {
+		t.Error("a second page did not end the listing")
+	}
+	// Restarting starts again.
+	if st := statusOf(t, page(infoDirectoryIDBoth, restartScans, 4096, "*")); st != statusSuccess {
+		t.Error("restarting did not start the listing again")
+	}
+	// A pattern that matches nothing still has "." and ".." in it, so the
+	// listing is not empty; one that matches only the file filters the rest.
+	if st := statusOf(t, page(infoDirectoryIDBoth, restartScans, 4096, "*.txt")); st != statusSuccess {
+		t.Error("a pattern that matches the file returned nothing")
+	}
+	// An output buffer too small for even one entry is refused rather than
+	// answered with an empty page.
+	if st := statusOf(t, page(infoDirectoryIDBoth, restartScans, 8, "*")); st != statusInvalidParameter {
+		t.Error("a buffer too small for one entry was answered anyway")
+	}
+	if st := statusOf(t, page(99, restartScans, 4096, "*")); st != statusInvalidInfoClass {
+		t.Error("a class this server does not write was answered anyway")
+	}
+	// Listing something that is not a directory.
+	cf, _ := opened(t, fs, "/file.txt", false)
+	fileBody := make([]byte, 32)
+	copy(fileBody[8:], cf.lastFile[:])
+	out, err := cf.dispatch(request(cmdQueryDirectory, 1, fileBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := statusOf(t, out); st != statusNotADirectory {
+		t.Errorf("listing a file answered %#x", st)
+	}
+}
+
+// Closing releases the handle, and a handle marked delete-on-close takes the
+// file with it.
+func TestCloseAndDeleteOnClose(t *testing.T) {
+	fs := &tinyFS{body: []byte("hello")}
+	c, of := opened(t, fs, "/file.txt", false)
+	of.deleteOnClose = true
+
+	body := make([]byte, 24)
+	copy(body[8:], of.id[:])
+	out, err := c.dispatch(request(cmdClose, 1, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := statusOf(t, out); st != statusSuccess {
+		t.Errorf("closing answered %#x", st)
+	}
+	if len(c.files) != 0 {
+		t.Error("the handle is still open after being closed")
+	}
+	if out, err = c.dispatch(request(cmdClose, 1, body)); err != nil {
+		t.Fatal(err)
+	}
+	if st := statusOf(t, out); st != statusFileClosed {
+		t.Errorf("closing a handle twice answered %#x", st)
+	}
+	// Flush answers success even with nothing to do: a client reads a failed
+	// flush as data loss.
+	if st := statusOf(t, mustDispatch(t, c, cmdFlush, make([]byte, 24))); st != statusSuccess {
+		t.Error("flush did not answer success")
+	}
+	if st := statusOf(t, mustDispatch(t, c, cmdFlush, nil)); st != statusSuccess {
+		t.Error("flush with no body did not answer success")
+	}
+}
+
+func mustDispatch(t *testing.T, c *conn, cmd command, body []byte) []byte {
+	t.Helper()
+	out, err := c.dispatch(request(cmd, 1, body))
+	if err != nil {
+		t.Fatalf("%v: %v", cmd, err)
+	}
+	return out
+}
+
+// A chained request speaks about what the one before it opened.
+func TestChainedRequestsInheritTheHandle(t *testing.T) {
+	fs := &tinyFS{body: []byte("hello")}
+	c, _ := opened(t, fs, "/", false)
+
+	name := utf16le("file.txt")
+	create := make([]byte, 56)
+	binary.LittleEndian.PutUint32(create[36:], dispOpen)
+	binary.LittleEndian.PutUint16(create[44:], uint16(headerLen+56))
+	binary.LittleEndian.PutUint16(create[46:], uint16(len(name)))
+	first := request(cmdCreate, 1, append(create, name...))
+	for len(first)%8 != 0 {
+		first = append(first, 0)
+	}
+	binary.LittleEndian.PutUint32(first[offNextCommand:], uint32(len(first)))
+
+	query := make([]byte, 40)
+	query[2], query[3] = infoTypeFile, fileStandardInformation
+	copy(query[24:], allOnesFileID[:]) // "the file the previous operation opened"
+	second := request(cmdQueryInfo, 0, query)
+	binary.LittleEndian.PutUint32(second[offFlags:], flagRelatedOps)
+
+	out, err := c.dispatchChain(append(first, second...))
+	if err != nil {
+		t.Fatalf("the chain: %v", err)
+	}
+	h, err := parseHeader(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.status != statusSuccess || h.nextCommand == 0 {
+		t.Fatalf("the first reply is %#x with next=%d; a chain of two should answer twice", h.status, h.nextCommand)
+	}
+	if st := statusOf(t, out[h.nextCommand:]); st != statusSuccess {
+		t.Errorf("the chained QUERY_INFO answered %#x: it did not find the handle", st)
+	}
+	// A chain whose next-command offset points nowhere is an error, not a
+	// wrong answer.
+	broken := append([]byte(nil), first...)
+	binary.LittleEndian.PutUint32(broken[offNextCommand:], 1<<20)
+	if _, err := c.dispatchChain(broken); err == nil || !strings.Contains(err.Error(), "chained") {
+		t.Errorf("a chain pointing past the end: %v", err)
+	}
+}

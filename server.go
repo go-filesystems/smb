@@ -142,7 +142,7 @@ func (s *Server) Serve(ln net.Listener) error {
 			}
 			return err
 		}
-		c := &conn{srv: s, nc: nc, sessions: map[uint64]*session{}, trees: map[uint32]*share{}}
+		c := newConn(s, nc)
 		s.mu.Lock()
 		s.conns[c] = struct{}{}
 		s.mu.Unlock()
@@ -198,6 +198,25 @@ type conn struct {
 	trees    map[uint32]*share
 	nextTree uint32
 	pending  *challenge // the NTLM challenge sent, awaiting its answer
+
+	panicked any // what a connection died of, for a test to insist on
+	files    map[[16]byte]*openFile
+	nextFile uint64
+	lastFile [16]byte // what an all-ones file id in a chained request means
+	// searches remembers where a directory listing got to, keyed by the
+	// handle it is being read through: SMB asks for a directory in pages and
+	// expects the second page to continue the first.
+	searches map[[16]byte]*search
+}
+
+func newConn(s *Server, nc net.Conn) *conn {
+	return &conn{
+		srv: s, nc: nc,
+		sessions: map[uint64]*session{},
+		trees:    map[uint32]*share{},
+		files:    map[[16]byte]*openFile{},
+		searches: map[[16]byte]*search{},
+	}
 }
 
 // A session is one authenticated user on one connection.
@@ -208,12 +227,30 @@ type session struct {
 
 func (c *conn) serve() {
 	defer c.nc.Close()
+	// One connection's crash must not be every connection's. A panic here is
+	// a defect and will be fixed, but a server that dies of one takes every
+	// other client's mount with it -- and the driver underneath is parsing an
+	// image this server did not write.
+	defer func() {
+		if r := recover(); r != nil {
+			c.panicked = r
+		}
+	}()
+	// A client that hangs up mid-transfer still holds driver handles; they are
+	// the driver's memory, not ours, and nothing else will close them.
+	defer func() {
+		for _, of := range c.files {
+			if of.f != nil {
+				of.f.Close()
+			}
+		}
+	}()
 	for {
 		msg, err := readFrame(c.nc)
 		if err != nil {
 			return
 		}
-		out, err := c.dispatch(msg)
+		out, err := c.dispatchChain(msg)
 		if err != nil {
 			return
 		}
@@ -224,6 +261,90 @@ func (c *conn) serve() {
 			return
 		}
 	}
+}
+
+// dispatchChain answers one FRAME, which may hold several requests.
+//
+// A client is allowed to chain requests -- NextCommand in each header says
+// where the next one starts -- and macOS does it on every open: CREATE,
+// QUERY_INFO and CLOSE arrive in a single message. A server that answers only
+// the first leaves the client waiting for replies that never come, which is
+// exactly what a mount attempt looked like before this existed: the handshake
+// went through, one CREATE was answered, and the client sat there until it
+// timed out.
+//
+// The replies are chained the same way. Each one but the last is padded to an
+// eight-byte boundary, because the offset that points at its successor has to
+// land on one.
+func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
+	// The legacy greeting is not an SMB2 message and has no header to parse,
+	// so it is answered before the loop that reads one. Putting this check
+	// only inside dispatch is a mistake that costs a whole afternoon: the Go
+	// client never sends the greeting, so the tests stay green while every
+	// mount from macOS dies at the first frame, silently.
+	if len(msg) >= 4 && [4]byte(msg[:4]) == smb1ProtocolID {
+		return c.legacyNegotiateResponse()
+	}
+	var (
+		out       []byte
+		prevAt    = -1 // where the previous reply's header starts, inside out
+		first     header
+		haveFirst bool
+	)
+	for {
+		h, err := parseHeader(msg)
+		if err != nil {
+			return nil, err
+		}
+		end := len(msg)
+		if h.nextCommand != 0 {
+			if int(h.nextCommand) > len(msg) || h.nextCommand < headerLen {
+				return nil, fmt.Errorf("smb: a chained request says the next one starts at %d of %d bytes", h.nextCommand, len(msg))
+			}
+			end = int(h.nextCommand)
+		}
+		one := msg[:end]
+		// The related-operations flag means this request speaks about what the
+		// first one opened: it carries no session or tree of its own.
+		if haveFirst && h.flags&flagRelatedOps != 0 {
+			one = withInheritedIDs(one, first)
+		}
+		if !haveFirst {
+			first, haveFirst = h, true
+		}
+
+		reply, err := c.dispatch(one)
+		if err != nil {
+			return nil, err
+		}
+		if reply != nil {
+			if prevAt >= 0 {
+				binary.LittleEndian.PutUint32(out[prevAt+offNextCommand:], uint32(len(out)-prevAt))
+			}
+			prevAt = len(out)
+			out = append(out, reply...)
+			if h.nextCommand != 0 {
+				for len(out)%8 != 0 {
+					out = append(out, 0)
+				}
+			}
+		}
+		if h.nextCommand == 0 {
+			return out, nil
+		}
+		msg = msg[end:]
+	}
+}
+
+// withInheritedIDs gives a chained request the session and tree of the one it
+// follows, which is what the related-operations flag means. The handle is
+// inherited too, but that is spelled inside the body -- an all-ones file id --
+// and is resolved where the handles live.
+func withInheritedIDs(msg []byte, first header) []byte {
+	out := append([]byte(nil), msg...)
+	binary.LittleEndian.PutUint32(out[offTreeID:], first.treeID)
+	binary.LittleEndian.PutUint64(out[offSessionID:], first.sessionID)
+	return out
 }
 
 // dispatch answers one message. An error stops the connection; a nil response
@@ -255,6 +376,22 @@ func (c *conn) dispatch(msg []byte) ([]byte, error) {
 		return simpleResponse(h, statusSuccess, 4), nil
 	case cmdEcho:
 		return simpleResponse(h, statusSuccess, 4), nil
+	case cmdCreate:
+		return c.create(h, body, msg)
+	case cmdClose:
+		return c.closeFile(h, body)
+	case cmdRead:
+		return c.read(h, body)
+	case cmdWrite:
+		return c.write(h, body, msg)
+	case cmdFlush:
+		return c.flush(h, body)
+	case cmdQueryDirectory:
+		return c.queryDirectory(h, body, msg)
+	case cmdQueryInfo:
+		return c.queryInfo(h, body)
+	case cmdSetInfo:
+		return c.setInfo(h, body, msg)
 	default:
 		// Everything else is the next tranche. Refusing by name is what lets a
 		// client fall back or report, instead of waiting for a reply that

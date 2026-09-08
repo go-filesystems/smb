@@ -25,20 +25,19 @@ sight.
 
 ## Status
 
-**The handshake works, against clients this project did not write.**
+**A share mounts, and you can work in it.** Verified with the macOS kernel
+client on macOS 26 — `mount_smbfs`, then `ls`, `cat`, a write, and a 512 KiB
+copy whose sha256 matches — over a FAT32 image served by
+[`go-filesystems/fat32`](https://github.com/go-filesystems/fat32).
 
 | | |
 |---|---|
 | dialect negotiation | including the 1996 greeting a modern client still opens with |
-| NTLMv2 authentication | over SPNEGO, with the password never leaving the server |
-| connecting to a share | by name, without case |
-| reading and writing files | **not yet** — every other command answers `STATUS_NOT_IMPLEMENTED` by name, so a client reports instead of waiting |
-
-Verified two ways. `go-smb2` — a client written by someone else — authenticates
-and connects, in a test that runs everywhere. And macOS 26's own client, which
-answered `Authentication error` before NTLM worked and now gets as far as
-asking for the share list (which needs the DCE/RPC pipe this server does not
-have yet).
+| NTLMv2 over SPNEGO | the password never leaves the server |
+| opening, reading, writing | positional through `Opener`/`WritableFile`, whole-file where a driver has neither |
+| listing, renaming, truncating, deleting | including the chained requests macOS sends on every open |
+| signing, encryption, 3.x dialects | **not yet** — so a Linux client needs `vers=2.1` |
+| locks, change notification, streams, share enumeration | **not yet**, and each answers by name rather than by silence |
 
 ## Serving one
 

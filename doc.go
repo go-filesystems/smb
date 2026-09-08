@@ -24,7 +24,39 @@
 // # What is implemented
 //
 // Dialect 2.1, NTLMv2 authentication over SPNEGO, and the file operations a
-// file manager performs. The dialects above it add signing algorithms,
-// encryption and pre-authentication integrity; they are a later tranche, and
-// what is here refuses rather than pretends.
+// file manager performs: opening, reading, writing, listing, renaming,
+// truncating and deleting. That is enough for `mount -t cifs` on Linux and
+// mount_smbfs on macOS to mount a share and for a person to work in it.
+//
+// The dialects above 2.1 add signing algorithms, encryption and
+// pre-authentication integrity. They are a later tranche, and this refuses
+// them rather than naming one and failing to honour it -- which means a Linux
+// client needs vers=2.1, because mount.cifs asks for 3.1.1 by default.
+//
+// Not here: byte-range locks, change notification, alternate data streams,
+// security descriptors, and the DCE/RPC pipe that answers "what shares are
+// there" (so a client must be told the share name rather than browsing for
+// it). Each of those answers by name rather than by silence.
+//
+// # Serving one
+//
+//	fs, err := fat32.Open("disk.img", -1)
+//	if err != nil {
+//		return err
+//	}
+//	defer fs.Close()
+//
+//	srv := smb.New()
+//	srv.AddUser("alice", "hunter2")
+//	if err := srv.Share("disk", fs); err != nil {
+//		return err
+//	}
+//	return srv.ListenAndServe("127.0.0.1:4445")
+//
+// Port 445 is the one a client dials without being told, and it needs
+// privilege on every operating system -- so the examples use a high port, and
+// the mount command names it:
+//
+//	mount_smbfs //alice@127.0.0.1:4445/disk /Volumes/disk          # macOS
+//	mount -t cifs //127.0.0.1/disk /mnt -o port=4445,vers=2.1,...   # Linux
 package smb
