@@ -25,10 +25,19 @@ sight.
 
 ## Status
 
-**A share mounts, and you can work in it.** Verified with the macOS kernel
-client on macOS 26 — `mount_smbfs`, then `ls`, `cat`, a write, and a 512 KiB
-copy whose sha256 matches — over a FAT32 image served by
-[`go-filesystems/fat32`](https://github.com/go-filesystems/fat32).
+**A share mounts, and you can work in it.**
+
+Verified with the macOS kernel client on macOS 26 — `mount_smbfs`, then `ls`,
+`cat`, a write, and a 512 KiB copy whose sha256 matches — over a FAT32 image
+served by [`go-filesystems/fat32`](https://github.com/go-filesystems/fat32).
+`smbutil statshares` reports `SMB_3.0.2` and `SIGNING_SUPPORTED TRUE`.
+
+And with the Linux kernel client in CI, which mounts it with **no dialect
+named**:
+
+```
+//127.0.0.1/disk on /mnt type cifs (rw,vers=default,username=alice,…)
+```
 
 | | |
 |---|---|
@@ -36,8 +45,16 @@ copy whose sha256 matches — over a FAT32 image served by
 | NTLMv2 over SPNEGO | the password never leaves the server |
 | opening, reading, writing | positional through `Opener`/`WritableFile`, whole-file where a driver has neither |
 | listing, renaming, truncating, deleting | including the chained requests macOS sends on every open |
-| signing, encryption, 3.x dialects | **not yet** — so a Linux client needs `vers=2.1` |
+| signing | **HMAC-SHA256** for 2.x, **AES-CMAC** for 3.x, both implemented here |
+| dialects | 2.1, 3.0 and 3.0.2 — Linux mounts with no `vers=` at all, macOS settles on 3.0.2 |
+| encryption and 3.1.1 | **not yet** — 3.1.1 changes the shape of the exchange, and naming it without pre-authentication integrity would promise what is not there |
 | locks, change notification, streams, share enumeration | **not yet**, and each answers by name rather than by silence |
+
+Windows is the client this package was written for and the one **not yet
+verified**: signing is implemented because Windows 11 requires it, and
+`FSCTL_VALIDATE_NEGOTIATE_INFO` because it drops a connection whose answer to
+it is missing — but neither has been put to a real Windows client here. Two
+operating systems have mounted this; the third is a claim nobody has checked.
 
 ## Serving one
 

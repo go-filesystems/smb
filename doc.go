@@ -23,15 +23,17 @@
 //
 // # What is implemented
 //
-// Dialect 2.1, NTLMv2 authentication over SPNEGO, and the file operations a
-// file manager performs: opening, reading, writing, listing, renaming,
-// truncating and deleting. That is enough for `mount -t cifs` on Linux and
-// mount_smbfs on macOS to mount a share and for a person to work in it.
+// Dialects 2.1, 3.0 and 3.0.2; NTLMv2 authentication over SPNEGO or raw, as
+// the client prefers; signing, with HMAC-SHA256 or AES-CMAC as the dialect
+// requires; and the file operations a file manager performs: opening,
+// reading, writing, listing, renaming, truncating and deleting.
 //
-// The dialects above 2.1 add signing algorithms, encryption and
-// pre-authentication integrity. They are a later tranche, and this refuses
-// them rather than naming one and failing to honour it -- which means a Linux
-// client needs vers=2.1, because mount.cifs asks for 3.1.1 by default.
+// That is enough for `mount -t cifs` on Linux -- with no vers= at all -- and
+// for mount_smbfs on macOS, which settles on 3.0.2 signed.
+//
+// 3.1.1 is not here. It adds pre-authentication integrity and negotiate
+// contexts, which change the shape of the exchange itself; naming it without
+// them would promise what is not there. Nor is encryption.
 //
 // Not here: byte-range locks, change notification, alternate data streams,
 // security descriptors, and the DCE/RPC pipe that answers "what shares are
