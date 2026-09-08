@@ -70,24 +70,14 @@ func TestLiveMount(t *testing.T) {
 	opts := fmt.Sprintf("port=%d,username=alice,password=hunter2,vers=2.1,uid=%d,gid=%d",
 		port, os.Getuid(), os.Getgid())
 	if out, err := run("mount", "-t", "cifs", "//127.0.0.1/disk", mnt, "-o", opts); err != nil {
-		// mount.cifs says "Invalid argument" for a dozen different reasons and
-		// puts the actual one in the kernel log. Printing it here is the
-		// difference between a lane that says what is wrong and one that says
-		// only that something is.
-		kernel, _ := run("dmesg", "--ctime")
-		lines := strings.Split(strings.TrimSpace(kernel), "\n")
-		if len(lines) > 15 {
-			lines = lines[len(lines)-15:]
-		}
-		t.Fatalf("mounting with %q: %v\n%s\n--- the kernel's own account ---\n%s",
-			opts, err, out, strings.Join(lines, "\n"))
+		fatal(t, "mounting with %q: %v\n%s", opts, err, out)
 	}
 	defer run("umount", mnt)
 
 	// Everything a person does with a mount.
 	entries, err := os.ReadDir(mnt)
 	if err != nil {
-		t.Fatalf("listing the mount: %v", err)
+		fatal(t, "listing the mount: %v", err)
 	}
 	var names []string
 	for _, e := range entries {
@@ -99,7 +89,7 @@ func TestLiveMount(t *testing.T) {
 
 	got, err := os.ReadFile(filepath.Join(mnt, "greeting.txt"))
 	if err != nil {
-		t.Fatalf("reading through the mount: %v", err)
+		fatal(t, "reading through the mount: %v", err)
 	}
 	if !bytes.Equal(got, body) {
 		t.Errorf("read %d bytes of %d, and they differ", len(got), len(body))
@@ -116,11 +106,25 @@ func TestLiveMount(t *testing.T) {
 	// than through the mount that wrote it.
 	written := []byte("written by the kernel client")
 	if err := os.WriteFile(filepath.Join(mnt, "fromclient.txt"), written, 0o644); err != nil {
-		t.Fatalf("writing through the mount: %v", err)
+		fatal(t, "writing through the mount: %v", err)
 	}
 	if inDriver, err := mem.ReadFile("/fromclient.txt"); err != nil || !bytes.Equal(inDriver, written) {
 		t.Errorf("the filesystem holds %q (%v), not what the client wrote", inDriver, err)
 	}
+}
+
+// fatal fails with the kernel's own account of what went wrong. The client
+// here is a kernel module: it reports EIO or "Invalid argument" to userspace
+// and writes the actual reason to the log, so a lane without this says only
+// that something is wrong.
+func fatal(t *testing.T, format string, args ...any) {
+	t.Helper()
+	kernel, _ := run("dmesg", "--ctime")
+	lines := strings.Split(strings.TrimSpace(kernel), "\n")
+	if len(lines) > 20 {
+		lines = lines[len(lines)-20:]
+	}
+	t.Fatalf(format+"\n--- the kernel's own account ---\n%s", append(args, strings.Join(lines, "\n"))...)
 }
 
 // run executes a command as root, through sudo when it has to.
