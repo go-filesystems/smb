@@ -25,7 +25,7 @@ func (c *conn) sessionSetup(h header, body []byte) ([]byte, error) {
 	if secOff < 0 || secLen < 0 || secOff+secLen > len(body) {
 		return nil, fmt.Errorf("smb: the security buffer is not inside the message")
 	}
-	token, err := mechTokenOf(body[secOff : secOff+secLen])
+	token, wrapped, err := mechTokenOf(body[secOff : secOff+secLen])
 	if err != nil {
 		return errorResponse(h, statusLogonFailure), nil
 	}
@@ -40,13 +40,20 @@ func (c *conn) sessionSetup(h header, body []byte) ([]byte, error) {
 			return nil, err
 		}
 		c.pending = ch
+		c.spnego = wrapped
 		id := h.sessionID
 		if id == 0 {
 			c.nextID++
 			id = c.nextID
 		}
 		h.sessionID = id
-		return c.sessionSetupResponse(h, statusMoreProcessing, negTokenRespChallenge(msg)), nil
+		// In kind: wrapped for a client that wrapped, bare for one that did
+		// not. Linux's kernel client is the second kind.
+		reply := msg
+		if wrapped {
+			reply = negTokenRespChallenge(msg)
+		}
+		return c.sessionSetupResponse(h, statusMoreProcessing, reply), nil
 
 	case ntlmAuth:
 		if c.pending == nil {
@@ -69,7 +76,11 @@ func (c *conn) sessionSetup(h header, body []byte) ([]byte, error) {
 		}
 		c.pending = nil
 		c.sessions[h.sessionID] = &session{user: auth.user, sessionKey: key}
-		return c.sessionSetupResponse(h, statusSuccess, negTokenRespAccept()), nil
+		var done []byte
+		if c.spnego {
+			done = negTokenRespAccept()
+		}
+		return c.sessionSetupResponse(h, statusSuccess, done), nil
 
 	default:
 		return errorResponse(h, statusLogonFailure), nil

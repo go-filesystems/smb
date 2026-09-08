@@ -49,29 +49,35 @@ func negTokenRespAccept() []byte {
 	return derCtx(1, derSeq(derCtx(0, derEnum(0))))
 }
 
-// mechTokenOf digs the NTLM message out of whichever of the two shapes the
-// client sent: a NegTokenInit (its first message) or a NegTokenResp (its
-// second). A bare NTLMSSP message with no envelope is accepted too, because
-// some clients send one.
-func mechTokenOf(blob []byte) ([]byte, error) {
+// mechTokenOf digs the NTLM message out of whichever shape the client sent: a
+// NegTokenInit (its first message), a NegTokenResp (its second), or no
+// envelope at all.
+//
+// The second return says WHICH, and it is not a detail. The Linux kernel's
+// client speaks "raw NTLMSSP" -- it sends a bare message and expects a bare
+// one back -- while macOS wraps both in SPNEGO. Answering a bare message with
+// a wrapped one gets `CIFS: VFS: blob signature incorrect` in the kernel log
+// and mount error(22) at the console: it reads the first eight bytes of the
+// reply, looks for "NTLMSSP", and finds ASN.1.
+func mechTokenOf(blob []byte) (token []byte, wrapped bool, err error) {
 	if bytes.HasPrefix(blob, ntlmSignature[:]) {
-		return blob, nil
+		return blob, false, nil
 	}
 	if len(blob) == 0 {
-		return nil, errNotSPNEGO
+		return nil, false, errNotSPNEGO
 	}
 	body := blob
 	if body[0] == 0x60 { // [APPLICATION 0]: a NegTokenInit, with the SPNEGO OID in front
 		var err error
 		if body, err = derUnwrap(body, 0x60); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		oid, rest, err := derSplit(body, 0x06)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if !bytes.Equal(oid, oidSPNEGO) {
-			return nil, fmt.Errorf("%w: the mechanism is not SPNEGO", errNotSPNEGO)
+			return nil, false, fmt.Errorf("%w: the mechanism is not SPNEGO", errNotSPNEGO)
 		}
 		body = rest
 	}
@@ -80,26 +86,27 @@ func mechTokenOf(blob []byte) ([]byte, error) {
 	// shape, responseToken in the second.
 	inner, err := derUnwrapAny(body, 0xA0, 0xA1)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	seq, err := derUnwrap(inner, 0x30)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	for len(seq) > 0 {
 		tag := seq[0]
 		content, rest, err := derSplit(seq, tag)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		// mechToken is [2] in a NegTokenInit and responseToken is [2] in a
 		// NegTokenResp: the same tag, which is why one loop reads both.
 		if tag == 0xA2 {
-			return derUnwrap(content, 0x04)
+			tok, err := derUnwrap(content, 0x04)
+			return tok, true, err
 		}
 		seq = rest
 	}
-	return nil, fmt.Errorf("%w: there is no token in it", errNotSPNEGO)
+	return nil, false, fmt.Errorf("%w: there is no token in it", errNotSPNEGO)
 }
 
 // ─── just enough DER ─────────────────────────────────────────────────────────

@@ -198,6 +198,7 @@ type conn struct {
 	trees    map[uint32]*share
 	nextTree uint32
 	pending  *challenge // the NTLM challenge sent, awaiting its answer
+	spnego   bool       // whether this client wraps its tokens, or sends them bare
 
 	panicked any // what a connection died of, for a test to insist on
 	files    map[[16]byte]*openFile
