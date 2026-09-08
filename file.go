@@ -214,6 +214,11 @@ func (c *conn) closeFile(h header, body []byte) ([]byte, error) {
 		of.f.Close()
 	}
 	delete(c.files, of.id)
+	// The listing this handle was paging through goes with it. It holds a Stat
+	// for every entry in the directory, and a client that opens and closes
+	// directories all day -- which is what a file manager does -- would
+	// otherwise leave one behind each time.
+	delete(c.searches, of.id)
 	if of.deleteOnClose && !of.share.ro {
 		if of.dir {
 			of.share.fsys.DeleteDir(of.path)
