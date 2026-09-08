@@ -74,8 +74,13 @@ func ioctlResponse(h header, code uint32, out []byte) []byte {
 	binary.LittleEndian.PutUint32(rb[4:], code)
 	// The file id stays all zeros: this control code is about the connection,
 	// not about anything opened on it.
-	binary.LittleEndian.PutUint32(rb[24:], headerLen+bodyLen) // output offset
-	binary.LittleEndian.PutUint32(rb[28:], uint32(len(out)))
+	//
+	// OUTPUT at 32 and 36, not 24 and 28 -- those are the INPUT offset and
+	// count, and a response that puts the payload's size there leaves the
+	// output count zero. The Linux kernel reads exactly that field and says
+	// "Invalid protocol negotiate response size: 0", then refuses the mount.
+	binary.LittleEndian.PutUint32(rb[32:], headerLen+bodyLen)
+	binary.LittleEndian.PutUint32(rb[36:], uint32(len(out)))
 	copy(rb[bodyLen:], out)
 	return b
 }

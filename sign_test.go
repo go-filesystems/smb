@@ -101,6 +101,14 @@ func TestValidateNegotiateInfo(t *testing.T) {
 	if st := statusOf(t, out); st != statusSuccess {
 		t.Fatalf("a matching validation answered %#x", st)
 	}
+	// The client reads the payload through the OUTPUT offset and count, and a
+	// response that fills the input ones instead looks empty to it.
+	if got := binary.LittleEndian.Uint32(out[headerLen+36:]); got != 24 {
+		t.Errorf("the response says its output is %d bytes, want 24", got)
+	}
+	if got := binary.LittleEndian.Uint32(out[headerLen+32:]); got != headerLen+48 {
+		t.Errorf("the response says its output starts at %d", got)
+	}
 	// What comes back must be what was negotiated, or the client concludes it
 	// was tampered with.
 	res := out[headerLen+48:]
