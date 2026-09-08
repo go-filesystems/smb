@@ -75,12 +75,21 @@ func (c *conn) sessionSetup(h header, body []byte) ([]byte, error) {
 			return errorResponse(h, statusLogonFailure), nil
 		}
 		c.pending = nil
-		c.sessions[h.sessionID] = &session{user: auth.user, sessionKey: key}
+		c.sessions[h.sessionID] = &session{
+			user:       auth.user,
+			sessionKey: key,
+			signingKey: signingKeyFor(c.dialect, key),
+		}
 		var done []byte
 		if c.spnego {
 			done = negTokenRespAccept()
 		}
-		return c.sessionSetupResponse(h, statusSuccess, done), nil
+		// The last message of the authentication is signed even though the
+		// request was not: it is the first thing a client can check, and it
+		// is what proves the server holds the same key.
+		reply := c.sessionSetupResponse(h, statusSuccess, done)
+		signMessage(c.dialect, c.sessions[h.sessionID].signingKey, reply)
+		return reply, nil
 
 	default:
 		return errorResponse(h, statusLogonFailure), nil

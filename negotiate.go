@@ -3,7 +3,6 @@
 package smb
 
 import (
-	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"time"
@@ -17,12 +16,16 @@ const (
 	maxWriteSize    = 1 << 20
 )
 
-// dialectsWeSpeak is in the order a server should prefer. 2.1 is the floor
-// worth speaking: 2.0.2 exists only for Vista, and the 3.x dialects need
-// signing algorithms, encryption and pre-authentication integrity that this
-// server does not implement yet -- so it names 2.1 rather than accept a 3.x
-// dialect it would then fail to honour.
-var dialectsWeSpeak = []uint16{dialect210}
+// dialectsWeSpeak, in the order a server should prefer.
+//
+// 3.0.2 and 3.0 sign with AES-CMAC and derive their key rather than using the
+// session key directly; 2.1 signs with HMAC-SHA256. All three are honoured
+// here. 3.1.1 is not: it adds pre-authentication integrity and negotiate
+// contexts, which change the shape of the exchange itself, and naming it
+// without implementing them would be promising what is not there.
+//
+// 2.0.2 exists only for Vista and is left out.
+var dialectsWeSpeak = []uint16{dialect302, dialect300, dialect210}
 
 // legacyNegotiateResponse answers the one SMB1 message this server reads.
 //
@@ -63,6 +66,8 @@ func (c *conn) negotiate(h header, body []byte) ([]byte, error) {
 		return errorResponse(h, statusNotSupported), nil
 	}
 	c.dialect = chosen
+	c.clientSecurityMode = binary.LittleEndian.Uint16(body[4:])
+	c.clientCapabilities = binary.LittleEndian.Uint32(body[8:])
 	return c.negotiateResponse(h, chosen), nil
 }
 
@@ -78,7 +83,9 @@ func (c *conn) negotiateResponse(h header, dialect uint16) []byte {
 	binary.LittleEndian.PutUint16(body[0:], 65)
 	binary.LittleEndian.PutUint16(body[2:], signingEnabled)
 	binary.LittleEndian.PutUint16(body[4:], dialect)
-	rand.Read(body[8:24]) // server GUID: identity, not a secret
+	copy(body[8:24], c.srv.guid[:]) // identity, not a secret -- and stable, because
+	//                                 the validate-negotiate exchange below
+	//                                 compares it against what was sent here
 	binary.LittleEndian.PutUint32(body[28:], maxTransactSize)
 	binary.LittleEndian.PutUint32(body[32:], maxReadSize)
 	binary.LittleEndian.PutUint32(body[36:], maxWriteSize)

@@ -3,6 +3,7 @@
 package smb
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -31,6 +32,7 @@ type Server struct {
 	shares map[string]*share
 	users  map[string]string // user name (as sent) -> password
 	name   string
+	guid   [16]byte
 	lns    []net.Listener
 	conns  map[*conn]struct{}
 	closed bool
@@ -57,12 +59,17 @@ func ReadOnly() ShareOption { return func(s *share) { s.ro = true } }
 // authenticates nobody: SMB has no anonymous mode worth offering, and a client
 // asked to mount without credentials is told so rather than let in.
 func New() *Server {
-	return &Server{
+	s := &Server{
 		shares: map[string]*share{},
 		users:  map[string]string{},
 		name:   "GOFS",
 		conns:  map[*conn]struct{}{},
 	}
+	// One identity for the life of the server: a client that validates the
+	// negotiate exchange compares this against what it was told, and a fresh
+	// one per connection would look like an attack.
+	rand.Read(s.guid[:])
+	return s
 }
 
 // SetName sets the NetBIOS-style name the server calls itself in the NTLM
@@ -196,13 +203,15 @@ type conn struct {
 	srv *Server
 	nc  net.Conn
 
-	dialect  uint16
-	nextID   uint64
-	sessions map[uint64]*session
-	trees    map[uint32]*share
-	nextTree uint32
-	pending  *challenge // the NTLM challenge sent, awaiting its answer
-	spnego   bool       // whether this client wraps its tokens, or sends them bare
+	dialect            uint16
+	clientSecurityMode uint16
+	clientCapabilities uint32
+	nextID             uint64
+	sessions           map[uint64]*session
+	trees              map[uint32]*share
+	nextTree           uint32
+	pending            *challenge // the NTLM challenge sent, awaiting its answer
+	spnego             bool       // whether this client wraps its tokens, or sends them bare
 
 	panicked any // what a connection died of, for a test to insist on
 	files    map[[16]byte]*openFile
@@ -228,6 +237,7 @@ func newConn(s *Server, nc net.Conn) *conn {
 type session struct {
 	user       string
 	sessionKey []byte
+	signingKey []byte
 }
 
 func (c *conn) serve() {
@@ -318,9 +328,24 @@ func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 			first, haveFirst = h, true
 		}
 
+		// A signed request is verified before it is read. A signature that
+		// does not check out is not a request from the party that
+		// authenticated, whatever it says in its header.
+		sess := c.sessions[binary.LittleEndian.Uint64(one[offSessionID:])]
+		if h.flags&flagSigned != 0 {
+			if sess == nil || !verifyMessage(c.dialect, sess.signingKey, one) {
+				return c.finish(out, prevAt, errorResponse(h, statusAccessDenied), sess, h), nil
+			}
+		}
+
 		reply, err := c.dispatch(one)
 		if err != nil {
 			return nil, err
+		}
+		// Signed in kind: a client that signed its request checks the reply,
+		// and one that did not would reject a signature it cannot verify.
+		if reply != nil && h.flags&flagSigned != 0 && sess != nil {
+			signMessage(c.dialect, sess.signingKey, reply)
 		}
 		if reply != nil {
 			if prevAt >= 0 {
@@ -339,6 +364,19 @@ func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 		}
 		msg = msg[end:]
 	}
+}
+
+// finish appends one last reply to a chain and returns what to send. The
+// refusal path uses it so a rejected signature still answers in the shape the
+// client is reading.
+func (c *conn) finish(out []byte, prevAt int, reply []byte, sess *session, h header) []byte {
+	if sess != nil && h.flags&flagSigned != 0 {
+		signMessage(c.dialect, sess.signingKey, reply)
+	}
+	if prevAt >= 0 {
+		binary.LittleEndian.PutUint32(out[prevAt+offNextCommand:], uint32(len(out)-prevAt))
+	}
+	return append(out, reply...)
 }
 
 // withInheritedIDs gives a chained request the session and tree of the one it
@@ -397,6 +435,8 @@ func (c *conn) dispatch(msg []byte) ([]byte, error) {
 		return c.queryInfo(h, body)
 	case cmdSetInfo:
 		return c.setInfo(h, body, msg)
+	case cmdIoctl:
+		return c.ioctl(h, body, msg)
 	default:
 		// Everything else is the next tranche. Refusing by name is what lets a
 		// client fall back or report, instead of waiting for a reply that
