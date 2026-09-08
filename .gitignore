@@ -1,0 +1,4 @@
+# Compiled binaries. `go build` in the repository root leaves one named after
+# the module, and `git add -A` sweeps it in. Build to /tmp instead.
+/smb
+/cover.out
