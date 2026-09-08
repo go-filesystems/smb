@@ -544,3 +544,32 @@ func TestTheIPCShareConnects(t *testing.T) {
 		t.Errorf("opening a pipe answered %#x", st)
 	}
 }
+
+// A closed handle takes its half-read listing with it. The state is per
+// handle and unbounded otherwise: a file manager opens and closes directories
+// all day, and each one holds a Stat for every entry it found.
+func TestClosingAHandleFreesItsListing(t *testing.T) {
+	fs := &tinyFS{body: []byte("hello")}
+	c, of := opened(t, fs, "/", false)
+
+	list := make([]byte, 32)
+	list[2] = infoDirectoryIDBoth
+	copy(list[8:], of.id[:])
+	binary.LittleEndian.PutUint16(list[24:], uint16(headerLen+32))
+	binary.LittleEndian.PutUint32(list[28:], 4096)
+	if st := statusOf(t, mustDispatch(t, c, cmdQueryDirectory, list)); st != statusSuccess {
+		t.Fatal("the listing did not start")
+	}
+	if len(c.searches) != 1 {
+		t.Fatalf("the connection remembers %d listings, want 1", len(c.searches))
+	}
+
+	closeBody := make([]byte, 24)
+	copy(closeBody[8:], of.id[:])
+	if st := statusOf(t, mustDispatch(t, c, cmdClose, closeBody)); st != statusSuccess {
+		t.Fatal("closing failed")
+	}
+	if len(c.searches) != 0 {
+		t.Errorf("the listing outlived the handle: %d left", len(c.searches))
+	}
+}
