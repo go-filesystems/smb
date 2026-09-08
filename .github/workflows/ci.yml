@@ -1,0 +1,121 @@
+name: ci
+
+# The protocol is little-endian throughout and the tests execute on every
+# architecture rather than only compiling, because a forgotten byte-order
+# conversion is exactly what a big-endian lane finds and a cross-build does
+# not. s390x is not box-ticking here.
+#
+# There is deliberately NO live-mount job yet. The sibling nfs repository has
+# one, and this repository will when it can serve a file: a job that runs
+# `mount -t cifs` today would fail, and a job written to pass anyway -- naming
+# a test that does not exist, so `go test -run` finds nothing -- would be a
+# green badge for an empty check.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOWORK: "off"
+  CGO_ENABLED: "0"
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          check-latest: true
+          cache: true
+      - run: go vet ./...
+      - name: gofmt
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l $(git ls-files '*.go'))
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt-clean:"; echo "$unformatted"
+            exit 1
+          fi
+      - run: go test -count=1 ./...
+
+  race:
+    name: race detector
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          check-latest: true
+          cache: true
+      - run: go test -race -count=1 ./...
+
+  # THE ORG STANDARD IS 100%, AND THIS REPOSITORY DOES NOT MEET IT YET.
+  #
+  # It sits at 93.6%. What is missing is the halves of the connection loop that
+  # need a socket to fail in the middle of a message, and the branches that
+  # report a client hanging up. They are reachable and not yet reached; the
+  # floor refuses a regression and the job name says what the standard is.
+  coverage-floor:
+    name: coverage floor (93%, standard is 100%)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          check-latest: true
+          cache: true
+      - run: |
+          FLOOR=93.0
+          go test -coverprofile=cover.out ./... >/dev/null
+          go tool cover -func=cover.out
+          cov=$(go tool cover -func=cover.out | tail -1 | awk '{print $3}' | tr -d '%')
+          echo "coverage: ${cov}%  floor: ${FLOOR}%  standard: 100%"
+          awk -v c="$cov" -v f="$FLOOR" 'BEGIN{exit !(c+0 < f+0)}' && {
+            echo "::error::coverage ${cov}% fell below the recorded floor ${FLOOR}%"; exit 1; }
+          awk -v c="$cov" 'BEGIN{if (c+0 < 100) printf "::warning::%.1f points short of the 100%% standard\n", 100-c}'
+
+  arches:
+    name: arch ${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64, riscv64, loong64, ppc64le, s390x]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          check-latest: true
+          cache: true
+      - run: GOARCH=${{ matrix.goarch }} go build ./...
+      - name: Install qemu-user-static
+        if: matrix.goarch != 'amd64' && matrix.goarch != 'arm64'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static
+      - name: Test
+        run: |
+          case "${{ matrix.goarch }}" in
+            amd64|arm64) go test -count=1 ./... ;;
+            riscv64)  GOARCH=riscv64 go test -count=1 -exec=qemu-riscv64-static ./... ;;
+            loong64)  GOARCH=loong64 go test -count=1 -exec=qemu-loongarch64-static ./... ;;
+            ppc64le)  GOARCH=ppc64le go test -count=1 -exec=qemu-ppc64le-static ./... ;;
+            s390x)    GOARCH=s390x   go test -count=1 -exec=qemu-s390x-static ./... ;;
+          esac
