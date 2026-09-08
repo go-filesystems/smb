@@ -190,11 +190,11 @@ func TestADialectWeDoNotSpeak(t *testing.T) {
 	}
 }
 
-// Everything not implemented yet answers by name, so a client reports or falls
+// What is still not implemented answers by name, so a client reports or falls
 // back instead of waiting for a reply that never comes.
 func TestWhatIsNotImplementedSaysSo(t *testing.T) {
-	c := &conn{srv: New(), sessions: map[uint64]*session{}, trees: map[uint32]*share{}}
-	for _, cmd := range []command{cmdCreate, cmdRead, cmdWrite, cmdQueryDirectory, cmdQueryInfo} {
+	c := newConn(New(), nil)
+	for _, cmd := range []command{cmdLock, cmdIoctl, cmdChangeNotify, cmdOplockBreak} {
 		out, err := c.dispatch(requestOf(cmd, nil))
 		if err != nil {
 			t.Fatalf("%v: %v", cmd, err)
@@ -224,6 +224,42 @@ func TestWhatIsNotImplementedSaysSo(t *testing.T) {
 	}
 	if _, err := c.dispatch([]byte{1, 2, 3}); err == nil {
 		t.Error("a message that is not a message was accepted")
+	}
+}
+
+// A command addressed to a share or a handle that is not there is refused with
+// the status that says WHICH is missing, because a client acts on the
+// difference: a stale handle is retried, a vanished share is not.
+func TestAHandleOrShareThatIsNotThere(t *testing.T) {
+	c := newConn(New(), nil)
+	out, err := c.dispatch(requestOf(cmdCreate, make([]byte, 56)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := parseHeader(out); h.status != statusNetworkNameDeleted {
+		t.Errorf("CREATE with no tree answered %#x, want NETWORK_NAME_DELETED", h.status)
+	}
+
+	// With a tree, but a handle nobody opened.
+	c.trees[0] = &share{name: "disk", fsys: nothingFS{}}
+	for _, tc := range []struct {
+		cmd  command
+		size int
+	}{
+		{cmdClose, 24}, {cmdRead, 48}, {cmdWrite, 48},
+		{cmdQueryDirectory, 32}, {cmdQueryInfo, 40}, {cmdSetInfo, 32},
+	} {
+		out, err := c.dispatch(requestOf(tc.cmd, make([]byte, tc.size)))
+		if err != nil {
+			t.Fatalf("%v: %v", tc.cmd, err)
+		}
+		if h, _ := parseHeader(out); h.status != statusFileClosed {
+			t.Errorf("%v with an unknown handle answered %#x, want FILE_CLOSED", tc.cmd, h.status)
+		}
+		// …and a body too short to read is an error, not a wrong answer.
+		if _, err := c.dispatch(requestOf(tc.cmd, make([]byte, 1))); err == nil {
+			t.Errorf("%v accepted a body of one byte", tc.cmd)
+		}
 	}
 }
 

@@ -96,21 +96,23 @@ func TestSPNEGO(t *testing.T) {
 	// and the token.
 	init := derApp(0, append(derOID(oidSPNEGO),
 		derCtx(0, derSeq(append(derCtx(0, derSeq(derOID(oidNTLMSSP))), derCtx(2, derOctet(ntlm))...)))...))
-	got, err := mechTokenOf(init)
-	if err != nil || !bytes.Equal(got, ntlm) {
-		t.Errorf("NegTokenInit: %v, %x", err, got)
+	got, wrapped, err := mechTokenOf(init)
+	if err != nil || !bytes.Equal(got, ntlm) || !wrapped {
+		t.Errorf("NegTokenInit: %v, %x, wrapped=%v", err, got, wrapped)
 	}
 
 	// A NegTokenResp, as it sends second.
 	resp := derCtx(1, derSeq(derCtx(2, derOctet(ntlm))))
-	got, err = mechTokenOf(resp)
-	if err != nil || !bytes.Equal(got, ntlm) {
-		t.Errorf("NegTokenResp: %v, %x", err, got)
+	got, wrapped, err = mechTokenOf(resp)
+	if err != nil || !bytes.Equal(got, ntlm) || !wrapped {
+		t.Errorf("NegTokenResp: %v, %x, wrapped=%v", err, got, wrapped)
 	}
 
 	// And a bare NTLM message with no envelope at all.
-	if got, err = mechTokenOf(ntlm); err != nil || !bytes.Equal(got, ntlm) {
-		t.Errorf("bare NTLMSSP: %v, %x", err, got)
+	// A bare message, which is what the Linux kernel's client sends -- and the
+	// answer has to be bare too.
+	if got, wrapped, err = mechTokenOf(ntlm); err != nil || !bytes.Equal(got, ntlm) || wrapped {
+		t.Errorf("bare NTLMSSP: %v, %x, wrapped=%v", err, got, wrapped)
 	}
 
 	for _, tc := range []struct {
@@ -125,7 +127,7 @@ func TestSPNEGO(t *testing.T) {
 		{"a length nobody encodes that way", []byte{0x60, 0x85, 1, 2, 3, 4, 5}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := mechTokenOf(tc.in); !errors.Is(err, errNotSPNEGO) {
+			if _, _, err := mechTokenOf(tc.in); !errors.Is(err, errNotSPNEGO) {
 				t.Errorf("error = %v, want errNotSPNEGO", err)
 			}
 		})
@@ -139,10 +141,10 @@ func TestSPNEGO(t *testing.T) {
 	}
 	// A long token exercises the two-byte length form on the way out.
 	long := negTokenRespChallenge(make([]byte, 300))
-	if tok, err := mechTokenOf(long); err != nil || len(tok) != 300 {
+	if tok, _, err := mechTokenOf(long); err != nil || len(tok) != 300 {
 		t.Errorf("a 300-byte challenge came back as %d bytes, %v", len(tok), err)
 	}
-	if tok, err := mechTokenOf(negTokenRespChallenge(make([]byte, 200))); err != nil || len(tok) != 200 {
+	if tok, _, err := mechTokenOf(negTokenRespChallenge(make([]byte, 200))); err != nil || len(tok) != 200 {
 		t.Errorf("a 200-byte challenge came back as %d bytes, %v", len(tok), err)
 	}
 }

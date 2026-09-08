@@ -11,6 +11,7 @@ import (
 // Share types and flags a TREE_CONNECT response carries.
 const (
 	shareTypeDisk uint8 = 0x01
+	shareTypePipe uint8 = 0x02
 
 	shareFlagManualCaching uint32 = 0x00000000
 
@@ -45,6 +46,23 @@ func (c *conn) treeConnect(h header, body []byte, msg []byte) ([]byte, error) {
 	if i := strings.LastIndex(path, `\`); i >= 0 {
 		name = path[i+1:]
 	}
+	// IPC$ is not a share anybody exported: it is the pipe share every SMB
+	// server has, and the Linux kernel's client TREE_CONNECTs to it before it
+	// will list anything, to ask for a DFS referral. Refusing it costs the
+	// whole mount -- "BAD_NETWORK_NAME: \\host\IPC$" in the kernel log, then
+	// "failed to connect to IPC", then EIO on the first readdir.
+	//
+	// Connecting is all that is needed. There are no pipes behind it: the
+	// referral request that follows is answered by name, and the client
+	// carries on with the share it actually wanted.
+	if strings.EqualFold(name, "IPC$") {
+		c.nextTree++
+		tid := c.nextTree
+		ipc := &share{name: "IPC$", ipc: true, ro: true}
+		c.trees[tid] = ipc
+		h.treeID = tid
+		return treeConnectResponse(h, shareTypePipe, accessRead), nil
+	}
 	sh := c.srv.shareByName(name)
 	if sh == nil {
 		// BAD_NETWORK_NAME is what a client turns into "the share does not
@@ -60,14 +78,18 @@ func (c *conn) treeConnect(h header, body []byte, msg []byte) ([]byte, error) {
 		access = accessRead
 	}
 	h.treeID = tid
+	return treeConnectResponse(h, shareTypeDisk, access), nil
+}
+
+func treeConnectResponse(h header, kind uint8, access uint32) []byte {
 	b := append(responseTo(h, statusSuccess), make([]byte, 16)...)
 	rb := b[headerLen:]
 	binary.LittleEndian.PutUint16(rb[0:], 16)
-	rb[2] = shareTypeDisk
+	rb[2] = kind
 	binary.LittleEndian.PutUint32(rb[4:], shareFlagManualCaching)
 	binary.LittleEndian.PutUint32(rb[8:], 0) // capabilities: none of the cluster ones
 	binary.LittleEndian.PutUint32(rb[12:], access)
-	return b, nil
+	return b
 }
 
 // tree returns the share a message is addressed to.

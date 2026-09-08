@@ -5,11 +5,9 @@ name: ci
 # conversion is exactly what a big-endian lane finds and a cross-build does
 # not. s390x is not box-ticking here.
 #
-# There is deliberately NO live-mount job yet. The sibling nfs repository has
-# one, and this repository will when it can serve a file: a job that runs
-# `mount -t cifs` today would fail, and a job written to pass anyway -- naming
-# a test that does not exist, so `go test -run` finds nothing -- would be a
-# green badge for an empty check.
+# The live-mount job is the one that matters: the Linux kernel's own SMB client
+# mounting a share this server exports. Everything else here is a library
+# talking to a library.
 
 on:
   push:
@@ -119,3 +117,32 @@ jobs:
             ppc64le)  GOARCH=ppc64le go test -count=1 -exec=qemu-ppc64le-static ./... ;;
             s390x)    GOARCH=s390x   go test -count=1 -exec=qemu-s390x-static ./... ;;
           esac
+
+  # The judge that is not a library: `mount -t cifs`, which is the kernel's
+  # client. It asks for things no Go client bothers with -- chained requests,
+  # credits, the information classes a stat needs -- and every one of those was
+  # a defect here until it did.
+  live-mount:
+    name: live mount (linux kernel client)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          check-latest: true
+          cache: true
+      - name: Install the client's userspace half
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq cifs-utils
+      - name: Mount, list, read, write
+        run: go test -tags livemount -count=1 -run TestLiveMount -v ./...
+      # A skip is not a pass. The test skips when it cannot mount, so the lane
+      # asserts that it actually ran.
+      - name: The test must not have skipped
+        run: |
+          out=$(go test -tags livemount -count=1 -run TestLiveMount -v ./... 2>&1)
+          echo "$out"
+          if echo "$out" | grep -q -- "--- SKIP"; then
+            echo "::error::the live mount test skipped; this lane proves nothing"
+            exit 1
+          fi

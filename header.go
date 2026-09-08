@@ -148,13 +148,34 @@ func responseTo(req header, status uint32) []byte {
 	binary.LittleEndian.PutUint16(b[offCreditCharge:], 1)
 	binary.LittleEndian.PutUint32(b[offStatus:], status)
 	binary.LittleEndian.PutUint16(b[offCommand:], uint16(req.command))
-	// One credit per reply keeps exactly one request in flight. A client that
-	// wants more asks for more; granting what was asked for is a later
-	// tranche, and granting zero would wedge the connection.
-	binary.LittleEndian.PutUint16(b[offCredits:], 1)
+	binary.LittleEndian.PutUint16(b[offCredits:], creditsFor(req))
 	binary.LittleEndian.PutUint32(b[offFlags:], flagServerToRedir)
 	binary.LittleEndian.PutUint64(b[offMessageID:], req.messageID)
 	binary.LittleEndian.PutUint32(b[offTreeID:], req.treeID)
 	binary.LittleEndian.PutUint64(b[offSessionID:], req.sessionID)
 	return b
+}
+
+// creditsFor grants what the client asked for, within a bound.
+//
+// Credits are not a formality. A client spends one per 64 KiB of a read or a
+// write, so a server that always grants one can never be asked for more than
+// 64 KiB -- and a client that wants a megabyte simply WAITS, having nothing to
+// spend, with no error on either side. macOS asks for 256 up front, and a
+// mount that hangs after TREE_CONNECT with nothing in the log is what a
+// hardcoded one looks like from the outside.
+//
+// The cap is what stops a client asking for an unbounded number of
+// outstanding operations; granting at least one is what stops the connection
+// wedging when it asks for none.
+func creditsFor(req header) uint16 {
+	const most = 512
+	want := req.credits
+	if want == 0 {
+		want = 1
+	}
+	if want > most {
+		want = most
+	}
+	return want
 }
