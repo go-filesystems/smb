@@ -40,6 +40,10 @@ type share struct {
 	name string
 	fsys filesystem.Filesystem
 	ro   bool
+	// ipc marks the pipe share a client connects to before it will use a real
+	// one. It has no filesystem behind it, and every file operation on it is
+	// refused rather than followed into a nil.
+	ipc bool
 }
 
 // ShareOption changes how one share is exported.

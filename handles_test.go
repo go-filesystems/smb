@@ -495,3 +495,52 @@ func TestChainedRequestsInheritTheHandle(t *testing.T) {
 		t.Errorf("a chain pointing past the end: %v", err)
 	}
 }
+
+// IPC$ is not a share anybody exported, and connecting to it has to succeed:
+// the Linux kernel's client asks for it before it will use a real share, and a
+// refusal costs the whole mount.
+func TestTheIPCShareConnects(t *testing.T) {
+	c := newConn(New(), nil)
+	c.sessions[0] = &session{user: "alice"}
+
+	connect := func(name string) []byte {
+		n := utf16le(`\\127.0.0.1\` + name)
+		body := make([]byte, 8)
+		binary.LittleEndian.PutUint16(body[4:], uint16(headerLen+8))
+		binary.LittleEndian.PutUint16(body[6:], uint16(len(n)))
+		out, err := c.dispatch(request(cmdTreeConnect, 0, append(body, n...)))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		return out
+	}
+
+	for _, name := range []string{"IPC$", "ipc$"} {
+		out := connect(name)
+		if st := statusOf(t, out); st != statusSuccess {
+			t.Fatalf("%s answered %#x", name, st)
+		}
+		if kind := out[headerLen+2]; kind != shareTypePipe {
+			t.Errorf("%s came back as share type %d, want a pipe", name, kind)
+		}
+	}
+	// A share nobody exported is still refused by name.
+	if st := statusOf(t, connect("nope")); st != statusBadNetworkName {
+		t.Errorf("a share that is not there answered %#x", st)
+	}
+
+	// …and there are no pipes behind it: an open on that tree is refused
+	// rather than followed into a filesystem that is not there.
+	h, _ := parseHeader(connect("IPC$"))
+	name := utf16le("srvsvc")
+	body := make([]byte, 56)
+	binary.LittleEndian.PutUint16(body[44:], uint16(headerLen+56))
+	binary.LittleEndian.PutUint16(body[46:], uint16(len(name)))
+	out, err := c.dispatch(request(cmdCreate, h.treeID, append(body, name...)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := statusOf(t, out); st != statusObjectNameNotFound {
+		t.Errorf("opening a pipe answered %#x", st)
+	}
+}

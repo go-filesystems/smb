@@ -78,6 +78,12 @@ func (c *conn) create(h header, body []byte, msg []byte) ([]byte, error) {
 	if sh == nil {
 		return errorResponse(h, statusNetworkNameDeleted), nil
 	}
+	if sh.ipc {
+		// There are no pipes behind IPC$ here. Saying so by name is what lets
+		// a client fall back; it is asking for \srvsvc or \wkssvc, and it
+		// carries on without them.
+		return errorResponse(h, statusObjectNameNotFound), nil
+	}
 	if len(body) < 56 {
 		return nil, fmt.Errorf("smb: CREATE body of %d bytes is too short", len(body))
 	}
