@@ -3,12 +3,14 @@ package smb
 import (
 	"encoding/binary"
 	"errors"
+	"github.com/go-filesystems/interface"
 	"io"
+	"net"
 	"os"
 	"strings"
+	"sync"
 	"testing"
-
-	filesystem "github.com/go-filesystems/interface"
+	"time"
 )
 
 // An SMB path is backslashed, relative, and must not leave the share.
@@ -401,4 +403,100 @@ func (twoCaseFS) ListDir(p string) ([]filesystem.DirEntry, error) {
 		filesystem.NewDirEntry(3, "ReadMe", 1),
 		filesystem.NewDirEntry(2, "README", 1),
 	}, nil
+}
+
+// captureConn stands in for the socket, so a test can read what the server
+// sent from a goroutine that is not the one it called.
+type captureConn struct {
+	mu     sync.Mutex
+	frames [][]byte
+}
+
+func (c *captureConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Strip the four-byte length header the framing adds.
+	if len(p) > 4 {
+		c.frames = append(c.frames, append([]byte(nil), p[4:]...))
+	}
+	return len(p), nil
+}
+
+// await returns the next frame the server sent, waiting for it to arrive.
+func (c *captureConn) await(t *testing.T) []byte {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		if len(c.frames) > 0 {
+			f := c.frames[0]
+			c.frames = c.frames[1:]
+			c.mu.Unlock()
+			return f
+		}
+		c.mu.Unlock()
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("nothing was sent within five seconds")
+	return nil
+}
+
+func (c *captureConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (c *captureConn) Close() error                     { return nil }
+func (c *captureConn) LocalAddr() net.Addr              { return nil }
+func (c *captureConn) RemoteAddr() net.Addr             { return nil }
+func (c *captureConn) SetDeadline(time.Time) error      { return nil }
+func (c *captureConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *captureConn) SetWriteDeadline(time.Time) error { return nil }
+
+// A lock of zero length reserves nothing, which is not the same as reserving
+// everything -- and two ranges that merely touch do not overlap.
+func TestLockRangesThatDoAndDoNotMeet(t *testing.T) {
+	held := byteLock{path: "/f", offset: 100, length: 50}
+	for _, tc := range []struct {
+		name        string
+		path        string
+		off, length uint64
+		want        bool
+	}{
+		{"the same range", "/f", 100, 50, true},
+		{"one byte inside", "/f", 149, 1, true},
+		{"the byte after", "/f", 150, 1, false},
+		{"the byte before", "/f", 99, 1, false},
+		{"a range around it", "/f", 0, 1000, true},
+		{"another file", "/g", 100, 50, false},
+		{"nothing at all", "/f", 100, 0, false},
+	} {
+		if got := held.overlaps(tc.path, tc.off, tc.length); got != tc.want {
+			t.Errorf("%s: overlaps = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	// A held range of zero length reserves nothing either.
+	empty := byteLock{path: "/f", offset: 100, length: 0}
+	if empty.overlaps("/f", 100, 50) {
+		t.Error("a zero-length lock reserved something")
+	}
+}
+
+// A watch covers its own directory, and everything below it only when the
+// client asked to watch the tree.
+func TestWhatAWatchCovers(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		x    watcher
+		path string
+		want bool
+	}{
+		{"a file in the directory", watcher{dir: "/sub"}, "/sub/f.txt", true},
+		{"a file below it", watcher{dir: "/sub"}, "/sub/deep/f.txt", false},
+		{"a file below it, watching the tree", watcher{dir: "/sub", tree: true}, "/sub/deep/f.txt", true},
+		{"a file elsewhere", watcher{dir: "/sub"}, "/other/f.txt", false},
+		{"a file elsewhere, watching the tree", watcher{dir: "/sub", tree: true}, "/other/f.txt", false},
+		{"a sibling with a longer name", watcher{dir: "/sub", tree: true}, "/subway/f.txt", false},
+		{"the root watching everything", watcher{dir: "/", tree: true}, "/a/b/c.txt", true},
+	} {
+		if got := tc.x.covers(tc.path); got != tc.want {
+			t.Errorf("%s: covers(%q) = %v, want %v", tc.name, tc.path, got, tc.want)
+		}
+	}
 }

@@ -38,4 +38,7 @@ const (
 	statusLockNotGranted       uint32 = 0xC0000055
 	statusRangeNotLocked       uint32 = 0xC000007E
 	statusFileLockConflict     uint32 = 0xC0000054
+	statusCancelled            uint32 = 0xC0000120
+	statusNotifyCleanup        uint32 = 0x0000010C
+	statusNotifyEnumDir        uint32 = 0x0000010D
 )

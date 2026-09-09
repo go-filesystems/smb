@@ -49,6 +49,10 @@ type share struct {
 	// other's way.
 	locks lockTable
 
+	// watchers are the outstanding CHANGE_NOTIFY requests on this share. See
+	// notify.go for what they can and cannot see.
+	watchers watchers
+
 	// mu serialises the driver.
 	//
 	// A Filesystem promises NOTHING about concurrent path-based calls --
@@ -257,6 +261,16 @@ type conn struct {
 	// handle it is being read through: SMB asks for a directory in pages and
 	// expects the second page to continue the first.
 	searches map[[16]byte]*search
+
+	// A reply can now be written by a goroutine that is not the one reading
+	// (see async.go), so writes are serialised and the state the two share is
+	// locked. Before that the loop read one message, answered it and read the
+	// next: everything was serial by construction, and none of this existed.
+	wmu          sync.Mutex // one writer at a time
+	mu           sync.Mutex // guards waiting and nextAsync
+	waiting      map[uint64]*pendingOp
+	nextAsync    uint64
+	asyncSession uint64 // whose key signs a reply sent from elsewhere
 }
 
 func newConn(s *Server, nc net.Conn) *conn {
@@ -266,6 +280,7 @@ func newConn(s *Server, nc net.Conn) *conn {
 		trees:    map[uint32]*share{},
 		files:    map[[16]byte]*openFile{},
 		searches: map[[16]byte]*search{},
+		waiting:  map[uint64]*pendingOp{},
 	}
 }
 
@@ -295,8 +310,10 @@ func (c *conn) serve() {
 				of.f.Close()
 			}
 			// A client that crashes holding a lock must not keep the file
-			// reserved for the life of the server.
+			// reserved for the life of the server, and an operation waiting
+			// on a handle nobody has open will never complete on its own.
 			of.share.locks.releaseAll(of.id)
+			c.cancelForFile(of.id)
 		}
 	}()
 	for {
@@ -478,6 +495,10 @@ func (c *conn) dispatch(msg []byte) ([]byte, error) {
 		return c.ioctl(h, body, msg)
 	case cmdLock:
 		return c.lock(h, body)
+	case cmdCancel:
+		return c.cancel(h)
+	case cmdChangeNotify:
+		return c.changeNotify(h, body)
 	default:
 		// Everything else is the next tranche. Refusing by name is what lets a
 		// client fall back or report, instead of waiting for a reply that

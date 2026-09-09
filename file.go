@@ -175,6 +175,9 @@ func (c *conn) create(h header, body []byte, msg []byte) ([]byte, error) {
 			}
 		}
 	}
+	if action == actionCreated {
+		sh.notify(p, actionAdded)
+	}
 	c.nextFile++
 	binary.LittleEndian.PutUint64(of.id[:8], c.nextFile)
 	binary.LittleEndian.PutUint64(of.id[8:], uint64(h.treeID))
@@ -223,6 +226,7 @@ func (c *conn) closeFile(h header, body []byte) ([]byte, error) {
 	}
 	delete(c.files, of.id)
 	of.share.locks.releaseAll(of.id)
+	c.cancelForFile(of.id)
 	defer of.share.changing()() // the file may go with the handle
 	// The listing this handle was paging through goes with it. It holds a Stat
 	// for every entry in the directory, and a client that opens and closes
@@ -235,6 +239,7 @@ func (c *conn) closeFile(h header, body []byte) ([]byte, error) {
 		} else {
 			of.share.fsys.DeleteFile(of.path)
 		}
+		of.share.notify(of.path, actionRemoved)
 	}
 
 	b := append(responseTo(h, statusSuccess), make([]byte, 60)...)
@@ -361,6 +366,8 @@ func (c *conn) write(h header, body []byte, msg []byte) ([]byte, error) {
 			return errorResponse(h, statusFor(err, statusAccessDenied)), nil
 		}
 	}
+
+	of.share.notify(of.path, actionModified)
 
 	b := append(responseTo(h, statusSuccess), make([]byte, 16)...)
 	rb := b[headerLen:]

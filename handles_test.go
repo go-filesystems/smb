@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	filesystem "github.com/go-filesystems/interface"
 )
@@ -762,5 +763,213 @@ func TestLocksAreEnforcedOnReadsAndWrites(t *testing.T) {
 	}
 	if st := write(other, 12, 4); st != statusFileLockConflict {
 		t.Errorf("writing through a shared lock answered %#x", st)
+	}
+}
+
+// A client that asks to WAIT for a lock is promised an answer and gets it when
+// the holder lets go -- rather than being refused, which is all this could do
+// before there was an asynchronous reply.
+func TestWaitingForALock(t *testing.T) {
+	fs := &tinyFS{body: make([]byte, 4096)}
+	c, holder := opened(t, fs, "/file.txt", false)
+	c.nc = &captureConn{}
+	waiter := &openFile{path: "/file.txt", share: holder.share}
+	waiter.id[0] = 2
+	c.files[waiter.id] = waiter
+
+	lockBody := func(handle *openFile, flags uint32) []byte {
+		body := make([]byte, 48)
+		binary.LittleEndian.PutUint16(body[2:], 1)
+		copy(body[8:], handle.id[:])
+		binary.LittleEndian.PutUint64(body[24:], 0)
+		binary.LittleEndian.PutUint64(body[32:], 100)
+		binary.LittleEndian.PutUint32(body[40:], flags)
+		return body
+	}
+
+	if st := statusOf(t, mustDispatch(t, c, cmdLock, lockBody(holder, lockExclusive|lockFailImmediately))); st != statusSuccess {
+		t.Fatal("the holder did not get the lock")
+	}
+
+	// The waiter asks without FAIL_IMMEDIATELY: it is asking to wait.
+	interim := mustDispatch(t, c, cmdLock, lockBody(waiter, lockExclusive))
+	h, err := parseHeader(interim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.status != statusPending {
+		t.Fatalf("waiting answered %#x, want STATUS_PENDING", h.status)
+	}
+	if h.flags&flagAsyncCommand == 0 {
+		t.Error("the interim reply is not marked async")
+	}
+	if h.asyncID == 0 {
+		t.Error("the interim reply carries no AsyncId")
+	}
+
+	// The holder lets go, and the answer arrives on its own.
+	if st := statusOf(t, mustDispatch(t, c, cmdLock, lockBody(holder, lockUnlock))); st != statusSuccess {
+		t.Fatal("unlocking failed")
+	}
+	reply := (c.nc.(*captureConn)).await(t)
+	final, err := parseHeader(reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.status != statusSuccess {
+		t.Errorf("the awaited lock answered %#x", final.status)
+	}
+	if final.asyncID != h.asyncID {
+		t.Errorf("the answer carries AsyncId %d, the promise carried %d", final.asyncID, h.asyncID)
+	}
+	if final.messageID != h.messageID {
+		t.Error("the answer does not match the request it answers")
+	}
+}
+
+// A client that gives up is told so, rather than left waiting for an answer
+// that is no longer coming.
+func TestCancellingAWait(t *testing.T) {
+	fs := &tinyFS{body: make([]byte, 4096)}
+	c, holder := opened(t, fs, "/file.txt", false)
+	c.nc = &captureConn{}
+	waiter := &openFile{path: "/file.txt", share: holder.share}
+	waiter.id[0] = 2
+	c.files[waiter.id] = waiter
+
+	body := make([]byte, 48)
+	binary.LittleEndian.PutUint16(body[2:], 1)
+	copy(body[8:], holder.id[:])
+	binary.LittleEndian.PutUint64(body[32:], 100)
+	binary.LittleEndian.PutUint32(body[40:], lockExclusive|lockFailImmediately)
+	if st := statusOf(t, mustDispatch(t, c, cmdLock, body)); st != statusSuccess {
+		t.Fatal("the holder did not get the lock")
+	}
+
+	wait := make([]byte, 48)
+	binary.LittleEndian.PutUint16(wait[2:], 1)
+	copy(wait[8:], waiter.id[:])
+	binary.LittleEndian.PutUint64(wait[32:], 100)
+	binary.LittleEndian.PutUint32(wait[40:], lockExclusive)
+	interim := mustDispatch(t, c, cmdLock, wait)
+	h, _ := parseHeader(interim)
+
+	// CANCEL names the operation by the AsyncId it was promised under.
+	req := responseTo(header{command: cmdCancel, messageID: h.messageID}, statusSuccess)
+	binary.LittleEndian.PutUint32(req[offFlags:], flagAsyncCommand)
+	binary.LittleEndian.PutUint64(req[offAsyncID:], h.asyncID)
+	if _, err := c.dispatch(append(req, make([]byte, 4)...)); err != nil {
+		t.Fatal(err)
+	}
+	reply := (c.nc.(*captureConn)).await(t)
+	final, _ := parseHeader(reply)
+	if final.status != statusCancelled {
+		t.Errorf("a cancelled wait answered %#x, want STATUS_CANCELLED", final.status)
+	}
+	// Cancelling something that is not there is silence, not an error: it
+	// finished between the client deciding and the message arriving.
+	if out, err := c.dispatch(append(req, make([]byte, 4)...)); err != nil || out != nil {
+		t.Errorf("cancelling twice gave %v, %v", out, err)
+	}
+}
+
+// A file manager asks to be told when a directory changes instead of asking
+// again every second. The answer comes when something happens.
+func TestChangeNotify(t *testing.T) {
+	fs := &tinyFS{body: []byte("hello")}
+	c, dir := opened(t, fs, "/", false)
+	c.nc = &captureConn{}
+
+	watch := func(flags uint16, max uint32) header {
+		t.Helper()
+		body := make([]byte, 32)
+		binary.LittleEndian.PutUint16(body[2:], flags)
+		binary.LittleEndian.PutUint32(body[4:], max)
+		copy(body[8:], dir.id[:])
+		interim := mustDispatch(t, c, cmdChangeNotify, body)
+		h, err := parseHeader(interim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h.status != statusPending {
+			t.Fatalf("CHANGE_NOTIFY answered %#x at once, want STATUS_PENDING", h.status)
+		}
+		return h
+	}
+
+	h := watch(0, 4096)
+	// Something happens: a file is written through this server.
+	writer := &openFile{path: "/file.txt", share: dir.share}
+	writer.id[0] = 7
+	c.files[writer.id] = writer
+	wb := make([]byte, 48+5)
+	binary.LittleEndian.PutUint16(wb[2:], uint16(headerLen+48))
+	binary.LittleEndian.PutUint32(wb[4:], 5)
+	copy(wb[16:], writer.id[:])
+	if st := statusOf(t, mustDispatch(t, c, cmdWrite, wb)); st != statusSuccess {
+		t.Fatal("the write failed")
+	}
+
+	reply := (c.nc.(*captureConn)).await(t)
+	final, err := parseHeader(reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.status != statusSuccess {
+		t.Fatalf("the notification answered %#x", final.status)
+	}
+	if final.asyncID != h.asyncID {
+		t.Errorf("the notification carries AsyncId %d, the promise carried %d", final.asyncID, h.asyncID)
+	}
+	// The entry names the file, relative to the directory being watched, and
+	// says what happened to it.
+	out := reply[headerLen+8:]
+	if action := binary.LittleEndian.Uint32(out[4:]); action != actionModified {
+		t.Errorf("the action is %d, want modified", action)
+	}
+	n := int(binary.LittleEndian.Uint32(out[8:]))
+	if got := fromUTF16le(out[12 : 12+n]); got != "file.txt" {
+		t.Errorf("the notification names %q", got)
+	}
+
+	// A burst bigger than the buffer the client offered is answered with
+	// "look again" rather than a list with holes in it.
+	h = watch(0, 8)
+	for i := 0; i < 4; i++ {
+		if st := statusOf(t, mustDispatch(t, c, cmdWrite, wb)); st != statusSuccess {
+			t.Fatal("a write failed")
+		}
+	}
+	reply = (c.nc.(*captureConn)).await(t)
+	if final, _ = parseHeader(reply); final.status != statusNotifyEnumDir {
+		t.Errorf("an overflowing notification answered %#x, want NOTIFY_ENUM_DIR", final.status)
+	}
+
+	// Closing the handle ends the watch rather than leaving a goroutine on it.
+	h = watch(0, 4096)
+	closeBody := make([]byte, 24)
+	copy(closeBody[8:], dir.id[:])
+	if st := statusOf(t, mustDispatch(t, c, cmdClose, closeBody)); st != statusSuccess {
+		t.Fatal("closing failed")
+	}
+	// The goroutine removes itself; give it the moment it needs.
+	for i := 0; i < 200 && dir.share.watchers.count() != 0; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := dir.share.watchers.count(); n != 0 {
+		t.Errorf("%d watches outlived the handle they were taken on", n)
+	}
+
+	// A watch on something that is not a directory, and on no handle at all.
+	notDir := &openFile{path: "/file.txt", share: dir.share}
+	notDir.id[0] = 8
+	c.files[notDir.id] = notDir
+	body := make([]byte, 32)
+	copy(body[8:], notDir.id[:])
+	if st := statusOf(t, mustDispatch(t, c, cmdChangeNotify, body)); st != statusInvalidParameter {
+		t.Errorf("watching a file answered %#x", st)
+	}
+	if st := statusOf(t, mustDispatch(t, c, cmdChangeNotify, make([]byte, 32))); st != statusFileClosed {
+		t.Errorf("watching no handle answered %#x", st)
 	}
 }

@@ -310,6 +310,8 @@ func (c *conn) setInfo(h header, body []byte, msg []byte) ([]byte, error) {
 		if err := of.share.fsys.Rename(of.path, to); err != nil {
 			return errorResponse(h, statusFor(err, statusAccessDenied)), nil
 		}
+		of.share.notify(of.path, actionRemoved)
+		of.share.notify(to, actionAdded)
 		of.path = to
 
 	case fileEndOfFileInformation, fileAllocationInformation:
@@ -320,6 +322,7 @@ func (c *conn) setInfo(h header, body []byte, msg []byte) ([]byte, error) {
 		if err := c.truncate(of, size); err != nil {
 			return errorResponse(h, statusFor(err, statusNotSupported)), nil
 		}
+		of.share.notify(of.path, actionModified)
 
 	case fileBasicInformationSet:
 		// Timestamps and attributes, which go-filesystems does not record.

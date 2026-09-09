@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // Byte-range locks are what an application uses to say "this part of the file
@@ -116,6 +117,12 @@ func (t *lockTable) held(path string, off, length uint64, by [16]byte, writing b
 	return false
 }
 
+// A lockElement is one range in a request, and what to do with it.
+type lockElement struct {
+	l      byteLock
+	unlock bool
+}
+
 // lock answers an SMB2 LOCK request.
 func (c *conn) lock(h header, body []byte) ([]byte, error) {
 	if len(body) < 24 {
@@ -132,16 +139,12 @@ func (c *conn) lock(h header, body []byte) ([]byte, error) {
 
 	// The elements are applied together or not at all: a client that asked for
 	// three ranges and got two would have no way to know which.
-	type element struct {
-		l      byteLock
-		unlock bool
-	}
-	elements := make([]element, 0, count)
+	elements := make([]lockElement, 0, count)
 	waiting := false
 	for i := 0; i < count; i++ {
 		e := body[24+i*24:]
 		flags := binary.LittleEndian.Uint32(e[16:])
-		elements = append(elements, element{
+		elements = append(elements, lockElement{
 			l: byteLock{
 				path:      of.path,
 				offset:    binary.LittleEndian.Uint64(e[0:]),
@@ -170,20 +173,72 @@ func (c *conn) lock(h header, body []byte) ([]byte, error) {
 		}
 		if !table.take(e.l) {
 			undo(table, taken)
-			// A client that did not say FAIL_IMMEDIATELY asked to WAIT, and
-			// waiting needs an asynchronous reply this server does not have
-			// yet: the connection reads one message at a time, so blocking
-			// here would stop the client that is waiting from doing anything
-			// else -- including releasing the lock somebody is waiting on.
-			// LOCK_NOT_GRANTED is the honest answer, and it is one every
-			// client already handles because it is what FAIL_IMMEDIATELY
-			// gets. See doc.go for what is not implemented.
-			_ = waiting
-			return errorResponse(h, statusLockNotGranted), nil
+			if !waiting {
+				return errorResponse(h, statusLockNotGranted), nil
+			}
+			// The client asked to WAIT. It is promised an answer, the loop
+			// carries on reading -- which is what lets the holder release the
+			// lock, and lets this client cancel -- and the answer is sent
+			// when one of those happens.
+			return c.waitForLocks(h, of, elements), nil
 		}
 		taken = append(taken, e.l)
 	}
 	return simpleResponse(h, statusSuccess, 4), nil
+}
+
+// waitForLocks answers a lock request that cannot be granted yet, later.
+//
+// It retries rather than being woken precisely, because the thing it is
+// waiting for is another client's release and there is no queue of waiters:
+// polling a few times a second costs nothing on an idle share and cannot
+// deadlock, which a hand-rolled wakeup between two clients easily can.
+func (c *conn) waitForLocks(h header, of *openFile, elements []lockElement) []byte {
+	op, interim := c.beginAsync(h, of.id)
+	c.mu.Lock()
+	c.asyncSession = h.sessionID
+	c.mu.Unlock()
+
+	go func() {
+		const (
+			every = 25 * time.Millisecond
+			// A lock nobody releases is not an error, so there is no timeout
+			// here: the client gave no deadline and CANCEL is how it takes
+			// one. The wait ends when the connection does.
+			forever = 0
+		)
+		_ = forever
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-op.cancel:
+				return // whoever cancelled has answered
+			case <-ticker.C:
+				var taken []byteLock
+				ok := true
+				for _, e := range elements {
+					if e.unlock {
+						continue
+					}
+					if !of.share.locks.take(e.l) {
+						ok = false
+						break
+					}
+					taken = append(taken, e.l)
+				}
+				if !ok {
+					undo(&of.share.locks, taken)
+					continue
+				}
+				reply := asyncResponse(h, statusSuccess, op.asyncID, 4)
+				binary.LittleEndian.PutUint16(reply[headerLen:], 4)
+				c.finishAsync(op, reply)
+				return
+			}
+		}
+	}()
+	return interim
 }
 
 // undo gives back the ranges taken by a request that then failed.

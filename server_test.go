@@ -208,7 +208,10 @@ func TestADialectWeDoNotSpeak(t *testing.T) {
 // back instead of waiting for a reply that never comes.
 func TestWhatIsNotImplementedSaysSo(t *testing.T) {
 	c := newConn(New(), nil)
-	for _, cmd := range []command{cmdChangeNotify, cmdOplockBreak} {
+	// What is left: oplocks and leases, which are a caching contract rather
+	// than a command, and everything a client can ask that this does not
+	// implement at all.
+	for _, cmd := range []command{cmdOplockBreak} {
 		out, err := c.dispatch(requestOf(cmd, nil))
 		if err != nil {
 			t.Fatalf("%v: %v", cmd, err)
