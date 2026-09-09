@@ -42,6 +42,23 @@ type share struct {
 	name string
 	fsys filesystem.Filesystem
 	ro   bool
+
+	// mu serialises the driver.
+	//
+	// A Filesystem promises NOTHING about concurrent path-based calls --
+	// only File.ReadAt and non-overlapping File.WriteAt are documented as
+	// safe -- and this server hands one Filesystem to every connection at
+	// once. macOS opens two connections for a single mount, so it is not a
+	// question of several people: one person is enough.
+	//
+	// It is held for the whole of a command rather than around each call,
+	// because the commands are not single calls. CREATE stats, may write,
+	// stats again and opens: two clients creating the same file would
+	// otherwise both find it missing and both create it.
+	//
+	// Reads share it. A mount is mostly reading, and excluding readers from
+	// each other would make one slow file block a whole share.
+	mu sync.RWMutex
 	// ipc marks the pipe share a client connects to before it will use a real
 	// one. It has no filesystem behind it, and every file operation on it is
 	// refused rather than followed into a nil.
@@ -112,6 +129,19 @@ func (s *Server) Share(name string, fsys filesystem.Filesystem, opts ...ShareOpt
 	}
 	s.shares[strings.ToUpper(name)] = sh
 	return nil
+}
+
+// reading takes the share's lock for a command that only reads, and returns
+// the release: `defer sh.reading()()`.
+func (s *share) reading() func() {
+	s.mu.RLock()
+	return s.mu.RUnlock
+}
+
+// changing takes it for a command that may write.
+func (s *share) changing() func() {
+	s.mu.Lock()
+	return s.mu.Unlock
 }
 
 func (s *Server) shareByName(name string) *share {

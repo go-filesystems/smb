@@ -7,7 +7,6 @@ import (
 	"path"
 	"sort"
 	"strings"
-	"sync"
 
 	filesystem "github.com/go-filesystems/interface"
 )
@@ -16,8 +15,15 @@ import (
 // about a driver. It comes in two shapes on purpose: with Opener/WritableFile,
 // which is the path a real driver takes, and without, which is the whole-file
 // fallback every driver that lacks them uses. Both must serve the same mount.
+// memFS has NO lock of its own, deliberately.
+//
+// It had one, and that is why the race lane stayed green while the server
+// handed a single Filesystem to every connection at once: the test's driver
+// was doing the serialising the server was not. A Filesystem promises nothing
+// about concurrent path-based calls, so a driver without a lock is the honest
+// one to test against -- and TestSeveralClientsOneShare will find any command
+// that forgot to take the share's.
 type memFS struct {
-	mu         sync.Mutex
 	files      map[string][]byte
 	dirs       map[string]bool
 	positional bool
@@ -35,8 +41,6 @@ func (m *memFS) Close() error  { return nil }
 func (m *memFS) Label() string { return "MEMFS" }
 
 func (m *memFS) ReadFile(p string) ([]byte, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	b, ok := m.files[p]
 	if !ok {
 		return nil, os.ErrNotExist
@@ -45,8 +49,6 @@ func (m *memFS) ReadFile(p string) ([]byte, error) {
 }
 
 func (m *memFS) WriteFile(p string, data []byte, _ os.FileMode) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if !m.dirs[path.Dir(p)] {
 		return os.ErrNotExist
 	}
@@ -55,8 +57,6 @@ func (m *memFS) WriteFile(p string, data []byte, _ os.FileMode) error {
 }
 
 func (m *memFS) ListDir(p string) ([]filesystem.DirEntry, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if !m.dirs[p] {
 		return nil, os.ErrNotExist
 	}
@@ -84,8 +84,6 @@ func (m *memFS) ListDir(p string) ([]filesystem.DirEntry, error) {
 }
 
 func (m *memFS) Stat(p string) (filesystem.Stat, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.dirs[p] {
 		return filesystem.NewStat(0o040755, 0, 1), nil
 	}
@@ -96,8 +94,6 @@ func (m *memFS) Stat(p string) (filesystem.Stat, error) {
 }
 
 func (m *memFS) MkDir(p string, _ os.FileMode) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if !m.dirs[path.Dir(p)] {
 		return os.ErrNotExist
 	}
@@ -109,8 +105,6 @@ func (m *memFS) MkDir(p string, _ os.FileMode) error {
 }
 
 func (m *memFS) DeleteFile(p string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if _, ok := m.files[p]; !ok {
 		return os.ErrNotExist
 	}
@@ -119,8 +113,6 @@ func (m *memFS) DeleteFile(p string) error {
 }
 
 func (m *memFS) DeleteDir(p string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if !m.dirs[p] {
 		return os.ErrNotExist
 	}
@@ -134,8 +126,6 @@ func (m *memFS) DeleteDir(p string) error {
 }
 
 func (m *memFS) Rename(from, to string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	b, ok := m.files[from]
 	if !ok {
 		return os.ErrNotExist
@@ -153,8 +143,6 @@ func (m *memFS) OpenFile(p string) (filesystem.File, error) {
 	if !m.positional {
 		return nil, errors.New("this filesystem has no positional access")
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.dirs[p] {
 		return nil, errors.New("that is a directory")
 	}
@@ -172,16 +160,12 @@ type memFile struct {
 func (f *memFile) Close() error { return nil }
 
 func (f *memFile) Size() int64 {
-	f.fs.mu.Lock()
-	defer f.fs.mu.Unlock()
 	return int64(len(f.fs.files[f.path]))
 }
 
 // ReadAt follows io.ReaderAt to the letter, because that is what the capability
 // promises and what a mount serving parallel requests relies on.
 func (f *memFile) ReadAt(p []byte, off int64) (int, error) {
-	f.fs.mu.Lock()
-	defer f.fs.mu.Unlock()
 	b := f.fs.files[f.path]
 	if off >= int64(len(b)) {
 		return 0, io.EOF
@@ -194,8 +178,6 @@ func (f *memFile) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (f *memFile) WriteAt(p []byte, off int64) (int, error) {
-	f.fs.mu.Lock()
-	defer f.fs.mu.Unlock()
 	b := f.fs.files[f.path]
 	if end := off + int64(len(p)); int64(len(b)) < end {
 		grown := make([]byte, end)
@@ -208,8 +190,6 @@ func (f *memFile) WriteAt(p []byte, off int64) (int, error) {
 }
 
 func (f *memFile) Truncate(n int64) error {
-	f.fs.mu.Lock()
-	defer f.fs.mu.Unlock()
 	b := f.fs.files[f.path]
 	if int64(len(b)) > n {
 		b = b[:n]

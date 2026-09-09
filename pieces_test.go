@@ -340,3 +340,65 @@ func TestSessionSetupRefusals(t *testing.T) {
 		t.Error("a body too short to read was accepted")
 	}
 }
+
+// Two names that differ only by case can exist together on a case-sensitive
+// driver. There is no right answer then, so the answer has to be the SAME one
+// every time: a client asking twice must not get two different files.
+func TestFoldingIsStableWhenTwoNamesDifferOnlyByCase(t *testing.T) {
+	fs := &twoCaseFS{}
+	first := resolveCase(fs, "/readme")
+	for i := 0; i < 20; i++ {
+		if got := resolveCase(fs, "/readme"); got != first {
+			t.Fatalf("folding gave %q and then %q", first, got)
+		}
+	}
+	if first != "/README" {
+		t.Errorf("folding chose %q; the sorted first is /README", first)
+	}
+	// An exact match wins over any folding.
+	if got := resolveCase(fs, "/ReadMe"); got != "/ReadMe" {
+		t.Errorf("an exact name was folded to %q", got)
+	}
+	// Nothing that matches: the path the client asked for is returned, so the
+	// error it gets names what it asked about.
+	if got := resolveCase(fs, "/nowhere/deep"); got != "/nowhere/deep" {
+		t.Errorf("a path that is not there came back as %q", got)
+	}
+	if got := resolveCase(fs, "/"); got != "/" {
+		t.Errorf("the root came back as %q", got)
+	}
+}
+
+// twoCaseFS holds README and ReadMe side by side, which ext4 permits.
+type twoCaseFS struct{}
+
+func (twoCaseFS) Close() error                                { return nil }
+func (twoCaseFS) ReadFile(string) ([]byte, error)             { return nil, os.ErrNotExist }
+func (twoCaseFS) WriteFile(string, []byte, os.FileMode) error { return os.ErrPermission }
+func (twoCaseFS) MkDir(string, os.FileMode) error             { return os.ErrPermission }
+func (twoCaseFS) DeleteFile(string) error                     { return os.ErrPermission }
+func (twoCaseFS) DeleteDir(string) error                      { return os.ErrPermission }
+func (twoCaseFS) Rename(string, string) error                 { return os.ErrPermission }
+func (twoCaseFS) ReadLink(string) (string, error)             { return "", os.ErrInvalid }
+
+func (twoCaseFS) Stat(p string) (filesystem.Stat, error) {
+	switch p {
+	case "/":
+		return filesystem.NewStat(0o040755, 0, 1), nil
+	case "/README", "/ReadMe":
+		return filesystem.NewStat(0o100644, 1, 2), nil
+	}
+	return nil, os.ErrNotExist
+}
+
+func (twoCaseFS) ListDir(p string) ([]filesystem.DirEntry, error) {
+	if p != "/" {
+		return nil, os.ErrNotExist
+	}
+	// Deliberately not in sorted order: the answer must not depend on the
+	// order the driver happens to return.
+	return []filesystem.DirEntry{
+		filesystem.NewDirEntry(3, "ReadMe", 1),
+		filesystem.NewDirEntry(2, "README", 1),
+	}, nil
+}

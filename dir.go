@@ -57,6 +57,7 @@ func (c *conn) queryDirectory(h header, body []byte, msg []byte) ([]byte, error)
 	if !of.dir {
 		return errorResponse(h, statusNotADirectory), nil
 	}
+	defer of.share.reading()()
 	patOff := int(binary.LittleEndian.Uint16(body[24:]))
 	patLen := int(binary.LittleEndian.Uint16(body[26:]))
 	outMax := int(binary.LittleEndian.Uint32(body[28:]))

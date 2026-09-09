@@ -2,9 +2,11 @@ package smb_test
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"sort"
+	"sync"
 	"testing"
 
 	fssmb "github.com/go-filesystems/smb"
@@ -211,4 +213,125 @@ func equal(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// Several clients on one share, which is not an exotic case: macOS opens TWO
+// connections for a single mount.
+//
+// The driver underneath has no lock of its own -- see memfs_test.go -- so this
+// is a test of the SERVER's serialisation and nothing else. Under -race it
+// finds any command that forgot to take the share's lock, which is how the
+// missing one was found in the first place.
+func TestSeveralClientsOneShare(t *testing.T) {
+	mem := newMemFS(true)
+	addr, srv := serve(t)
+	if err := srv.Share("disk", mem); err != nil {
+		t.Fatal(err)
+	}
+
+	const clients, each = 4, 15
+	var wg sync.WaitGroup
+	for c := 0; c < clients; c++ {
+		wg.Add(1)
+		go func(c int) {
+			defer wg.Done()
+			s, done := dial(t, addr, "alice", "hunter2")
+			defer done()
+			fs, err := s.Mount("disk")
+			if err != nil {
+				t.Errorf("client %d mounting: %v", c, err)
+				return
+			}
+			defer fs.Umount()
+			for i := 0; i < each; i++ {
+				name := fmt.Sprintf("c%d-%02d.txt", c, i)
+				if err := fs.WriteFile(name, []byte(name), 0o644); err != nil {
+					t.Errorf("client %d writing %s: %v", c, name, err)
+					return
+				}
+				got, err := fs.ReadFile(name)
+				if err != nil || string(got) != name {
+					t.Errorf("client %d read back %q, %v", c, got, err)
+					return
+				}
+				if _, err := fs.ReadDir("."); err != nil {
+					t.Errorf("client %d listing: %v", c, err)
+					return
+				}
+			}
+		}(c)
+	}
+	wg.Wait()
+
+	// Everything every client wrote is there: a race that lost a map write
+	// would show up as a missing file even when the detector is off.
+	entries, err := mem.ListDir("/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != clients*each {
+		t.Errorf("the share holds %d files, want %d", len(entries), clients*each)
+	}
+}
+
+// SMB is caseless and this server says so. The driver underneath may not be --
+// memFS is not, and neither is ext4 -- so the promise has to be kept here.
+func TestTheShareIsCaselessEvenWhenTheDriverIsNot(t *testing.T) {
+	mem := newMemFS(true)
+	addr, srv := serve(t)
+	if err := srv.Share("disk", mem); err != nil {
+		t.Fatal(err)
+	}
+	s, done := dial(t, addr, "alice", "hunter2")
+	defer done()
+	fs, err := s.Mount("disk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.Umount()
+
+	if err := fs.WriteFile("Hello.txt", []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Mkdir("Sub", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.WriteFile("Sub/Inner.TXT", []byte("inside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"hello.txt", "HELLO.TXT", "HeLLo.TxT"} {
+		got, err := fs.ReadFile(name)
+		if err != nil || string(got) != "hi" {
+			t.Errorf("reading %q gave %q, %v", name, got, err)
+		}
+	}
+	// A parent whose case is wrong has to be found before its child can be.
+	if got, err := fs.ReadFile("sub/inner.txt"); err != nil || string(got) != "inside" {
+		t.Errorf("reading through a folded directory gave %q, %v", got, err)
+	}
+
+	// The name is PRESERVED, not folded: a listing shows what was written.
+	entries, err := fs.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	if want := []string{"Hello.txt", "Sub"}; !equal(names, want) {
+		t.Errorf("the listing shows %v, want %v", names, want)
+	}
+	// …and only the driver's own name is there: folding must not have created
+	// a second file.
+	if _, err := mem.Stat("/hello.txt"); err == nil {
+		t.Error("a second file appeared under the folded name")
+	}
+
+	// A name that differs by more than case is still missing.
+	if _, err := fs.ReadFile("hello.text"); err == nil {
+		t.Error("a name that is not there was found")
+	}
 }
