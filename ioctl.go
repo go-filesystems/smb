@@ -11,6 +11,7 @@ import (
 const (
 	fsctlValidateNegotiateInfo uint32 = 0x00140204
 	fsctlDfsGetReferrals       uint32 = 0x00060194
+	fsctlPipeTransceive        uint32 = 0x0011C017
 )
 
 // ioctl answers the one control code a 3.x client insists on.
@@ -54,7 +55,36 @@ func (c *conn) ioctl(h header, body []byte, msg []byte) ([]byte, error) {
 		copy(out[4:], c.srv.guid[:])
 		binary.LittleEndian.PutUint16(out[20:], signingEnabled)
 		binary.LittleEndian.PutUint16(out[22:], c.dialect)
-		return ioctlResponse(h, code, out), nil
+		return ioctlResponse(h, code, out, [16]byte{}, statusSuccess), nil
+
+	case fsctlPipeTransceive:
+		// Write and read in one round trip, which is how a remote procedure
+		// call is made over a pipe: the call goes in the input, the reply
+		// comes back in the output. It is the only way `smbutil view` and the
+		// Finder ask what shares there are.
+		of := c.fileByID(body[8:])
+		if of == nil || of.pipe == nil {
+			return errorResponse(h, statusFileClosed), nil
+		}
+		if inOff < 0 || inLen < 0 || inOff+inLen > len(msg) {
+			return errorResponse(h, statusInvalidParameter), nil
+		}
+		reply := of.pipe.answer(c.srv, c.session(h).user, msg[inOff:inOff+inLen])
+		if reply == nil {
+			// Not something this pipe speaks. INVALID_PARAMETER rather than a
+			// fault: a fault is an answer within DCE/RPC, and this was not
+			// DCE/RPC at all.
+			return errorResponse(h, statusInvalidParameter), nil
+		}
+		of.pipe.out = reply
+		out, more := of.pipe.take(int(binary.LittleEndian.Uint32(body[44:])))
+		status := statusSuccess
+		if more {
+			// As much as fits, and a warning that says so. The client READs
+			// the tail from the pipe, which is why it stays on the handle.
+			status = statusBufferOverflow
+		}
+		return ioctlResponse(h, code, out, of.id, status), nil
 
 	case fsctlDfsGetReferrals:
 		// There is no distributed filesystem here, and saying so is what stops
@@ -66,14 +96,16 @@ func (c *conn) ioctl(h header, body []byte, msg []byte) ([]byte, error) {
 	}
 }
 
-func ioctlResponse(h header, code uint32, out []byte) []byte {
+func ioctlResponse(h header, code uint32, out []byte, id [16]byte, status uint32) []byte {
 	const bodyLen = 48
-	b := append(responseTo(h, statusSuccess), make([]byte, bodyLen+len(out))...)
+	b := append(responseTo(h, status), make([]byte, bodyLen+len(out))...)
 	rb := b[headerLen:]
 	binary.LittleEndian.PutUint16(rb[0:], 49)
 	binary.LittleEndian.PutUint32(rb[4:], code)
-	// The file id stays all zeros: this control code is about the connection,
-	// not about anything opened on it.
+	// The file id is all zeros for a control code about the CONNECTION -- and
+	// the handle's own for one about something opened on it, which a client
+	// matches against what it sent.
+	copy(rb[8:], id[:])
 	//
 	// OUTPUT at 32 and 36, not 24 and 28 -- those are the INPUT offset and
 	// count, and a response that puts the payload's size there leaves the

@@ -52,6 +52,11 @@ type openFile struct {
 	// people holding the same share get their own answer.
 	ro bool
 
+	// pipe is set when this handle is not a file at all: see pipe.go. Every
+	// command that would touch a filesystem checks it FIRST, because IPC$ has
+	// no filesystem and share.fsys is nil there.
+	pipe *pipe
+
 	// f is the driver's positional handle when it has one. A driver without
 	// Opener leaves this nil and the whole-file path is used instead, which is
 	// O(size) per request and is why the probe exists.
@@ -85,12 +90,6 @@ func (c *conn) create(h header, body []byte, msg []byte) ([]byte, error) {
 		return errorResponse(h, statusNetworkNameDeleted), nil
 	}
 	sh := tc.sh
-	if sh.ipc {
-		// There are no pipes behind IPC$ here. Saying so by name is what lets
-		// a client fall back; it is asking for \srvsvc or \wkssvc, and it
-		// carries on without them.
-		return errorResponse(h, statusObjectNameNotFound), nil
-	}
 	// CREATE stats, may write, stats again and opens. Two clients creating the
 	// same file would otherwise both find it missing.
 	defer sh.changing()()
@@ -104,7 +103,13 @@ func (c *conn) create(h header, body []byte, msg []byte) ([]byte, error) {
 	if nameOff < 0 || nameLen < 0 || nameOff+nameLen > len(msg) {
 		return nil, fmt.Errorf("smb: the file name is not inside the message")
 	}
-	p, ok := smbPathToFS(fromUTF16le(msg[nameOff : nameOff+nameLen]))
+	name := fromUTF16le(msg[nameOff : nameOff+nameLen])
+	if sh.ipc {
+		// Not a path: a pipe name. IPC$ has no filesystem behind it, and the
+		// handle that comes back speaks DCE/RPC.
+		return c.openPipe(h, name)
+	}
+	p, ok := smbPathToFS(name)
 	if !ok {
 		return errorResponse(h, statusObjectNameNotFound), nil
 	}
@@ -267,6 +272,9 @@ func (c *conn) read(h header, body []byte) ([]byte, error) {
 	if of == nil {
 		return errorResponse(h, statusFileClosed), nil
 	}
+	if of.pipe != nil {
+		return c.readPipe(h, of, length), nil
+	}
 	if of.dir {
 		return errorResponse(h, statusInvalidDeviceRequest), nil
 	}
@@ -330,16 +338,21 @@ func (c *conn) write(h header, body []byte, msg []byte) ([]byte, error) {
 	if of == nil {
 		return errorResponse(h, statusFileClosed), nil
 	}
+	if dataOff < 0 || length < 0 || dataOff+length > len(msg) {
+		return nil, fmt.Errorf("smb: the write payload is not inside the message")
+	}
+	data := msg[dataOff : dataOff+length]
+	// A pipe is written even on IPC$, which is read-only as a share: what the
+	// read-only flag is about is the filesystem, and there is none here.
+	if of.pipe != nil {
+		return c.writePipe(h, of, data), nil
+	}
 	if of.ro {
 		return errorResponse(h, statusMediaWriteProtected), nil
 	}
 	if of.dir {
 		return errorResponse(h, statusInvalidDeviceRequest), nil
 	}
-	if dataOff < 0 || length < 0 || dataOff+length > len(msg) {
-		return nil, fmt.Errorf("smb: the write payload is not inside the message")
-	}
-	data := msg[dataOff : dataOff+length]
 	// A write crosses NO lock held by anybody else, shared or exclusive.
 	if of.share.locks.held(of.path, uint64(offset), uint64(length), of.id, true) {
 		return errorResponse(h, statusFileLockConflict), nil

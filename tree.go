@@ -60,7 +60,14 @@ func (c *conn) treeConnect(h header, body []byte, msg []byte) ([]byte, error) {
 		tid := c.nextTree
 		c.trees[tid] = &treeConn{sh: &share{name: "IPC$", ipc: true, ro: true}, ro: true}
 		h.treeID = tid
-		return treeConnectResponse(h, shareTypePipe, accessRead), nil
+		// FULL access, not read: a remote procedure call is WRITTEN to the
+		// pipe. `smbutil view` reads the mask on the tree and gives up before
+		// it opens anything -- it connected to IPC$, disconnected, and printed
+		// "unable to list resources: Broken pipe" -- which looks like a broken
+		// pipe implementation and was a permission it was told it did not
+		// have. The read-only flag on the tree stays: it is about a
+		// filesystem, and IPC$ has none.
+		return treeConnectResponse(h, shareTypePipe, accessAll), nil
 	}
 	sh := c.srv.shareByName(name)
 	if sh == nil {

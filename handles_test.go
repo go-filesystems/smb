@@ -530,19 +530,29 @@ func TestTheIPCShareConnects(t *testing.T) {
 		t.Errorf("a share that is not there answered %#x", st)
 	}
 
-	// …and there are no pipes behind it: an open on that tree is refused
-	// rather than followed into a filesystem that is not there.
+	// There is ONE pipe behind it, and the others are refused by name -- not
+	// followed into a filesystem that is not there.
 	h, _ := parseHeader(connect("IPC$"))
-	name := utf16le("srvsvc")
-	body := make([]byte, 56)
-	binary.LittleEndian.PutUint16(body[44:], uint16(headerLen+56))
-	binary.LittleEndian.PutUint16(body[46:], uint16(len(name)))
-	out, err := c.dispatch(request(cmdCreate, h.treeID, append(body, name...)))
-	if err != nil {
-		t.Fatal(err)
+	open := func(pipe string) uint32 {
+		name := utf16le(pipe)
+		body := make([]byte, 56)
+		binary.LittleEndian.PutUint16(body[44:], uint16(headerLen+56))
+		binary.LittleEndian.PutUint16(body[46:], uint16(len(name)))
+		out, err := c.dispatch(request(cmdCreate, h.treeID, append(body, name...)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return statusOf(t, out)
 	}
-	if st := statusOf(t, out); st != statusObjectNameNotFound {
-		t.Errorf("opening a pipe answered %#x", st)
+	for _, pipe := range []string{"srvsvc", "SRVSVC", `\srvsvc`} {
+		if st := open(pipe); st != statusSuccess {
+			t.Errorf("opening %s answered %#x", pipe, st)
+		}
+	}
+	for _, pipe := range []string{"wkssvc", "lsarpc", "samr", "spoolss"} {
+		if st := open(pipe); st != statusObjectNameNotFound {
+			t.Errorf("opening %s answered %#x, want OBJECT_NAME_NOT_FOUND", pipe, st)
+		}
 	}
 }
 
