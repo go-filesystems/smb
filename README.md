@@ -51,6 +51,7 @@ named**:
 | byte-range locks | taken, released and **enforced** on reads and writes, including *waiting* for one |
 | change notification | on changes that go **through this server** — one made in the image by something else is invisible, because nothing underneath tells us |
 | asynchronous replies | `STATUS_PENDING` with an AsyncId, and `CANCEL` |
+| per-user access | who may connect (`allow`) and who may write (`writers`), per share — a reader is told so in the access mask rather than one refusal at a time |
 | streams, share enumeration, oplocks | **not yet**, and each answers by name rather than by silence |
 
 Windows is the client this package was written for and the one **not yet
@@ -92,11 +93,29 @@ share "photos" {
   image     = "/srv/photos.img"
   read_only = true
 }
+
+share "scratch" {
+  image   = "/srv/scratch.img"
+  allow   = ["alice", "bob"] # only these two may connect
+  writers = ["alice"]        # bob gets it read-only
+}
 ```
 
 ```sh
 smb-server -config /etc/smb.d
 ```
+
+A share is read-write only if the image **can** be opened for writing: one on
+a read-only medium, or one owned by somebody else, is served read-only and
+says which shares it did that to. `os.Open` returns a handle with a `WriteAt`
+method whichever way it was opened, so nothing in Go's types says no — a
+mount is what said no.
+
+A share that names nobody is every user's, read-write — so `allow` and
+`writers` are what you reach for when the server has more than one person on
+it. A name in either list that belongs to no `user` block is refused at
+startup: `allow = ["alise"]` would otherwise lock Alice out of her own share
+and start happily.
 
 On Windows, a path in an HCL string needs its backslashes doubled — `"C:\\srv\\photos.img"` — or forward slashes, which HCL and Windows both accept. `\U` and `\a` are escape sequences, and a single-backslash path is a syntax error rather than a path.
 

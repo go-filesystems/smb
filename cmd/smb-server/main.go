@@ -94,14 +94,25 @@ func run() error {
 	}
 	var shares []served
 	for _, s := range cfg.Shares {
-		fsys, kind, err := openImage(s.Image)
+		fsys, kind, ro, err := openImage(s.Image, s.ReadOnly)
 		if err != nil {
 			return fmt.Errorf("opening %s: %w", s.Image, err)
 		}
 		opened = append(opened, fsys)
 		var opts []smb.ShareOption
-		if s.ReadOnly {
+		if ro {
 			opts = append(opts, smb.ReadOnly())
+			if !s.ReadOnly {
+				// Not what was asked for, so it is said out loud: the share
+				// works, and it will not take a write.
+				fmt.Printf("%s could not be opened for writing: %s is read-only\n", s.Image, s.Name)
+			}
+		}
+		if len(s.Allow) > 0 {
+			opts = append(opts, smb.AllowUsers(s.Allow...))
+		}
+		if len(s.Writers) > 0 {
+			opts = append(opts, smb.WriteUsers(s.Writers...))
 		}
 		if err := srv.Share(s.Name, fsys, opts...); err != nil {
 			return err
@@ -231,22 +242,45 @@ func registerDrivers() {
 // offset zero and would find the table rather than a filesystem. Open(path,
 // partIndex) in each driver is still the way through one, and teaching detect
 // about partitions is a change to detect.
-func openImage(path string) (filesystem.Filesystem, detect.Type, error) {
-	f, err := os.Open(path)
+func openImage(path string, readOnly bool) (filesystem.Filesystem, detect.Type, bool, error) {
+	f, ro, err := openImageFile(path, readOnly)
 	if err != nil {
-		return nil, detect.Unknown, err
+		return nil, detect.Unknown, ro, err
 	}
 	info, err := f.Stat()
 	if err != nil {
 		f.Close()
-		return nil, detect.Unknown, err
+		return nil, detect.Unknown, ro, err
 	}
 	fsys, kind, err := detect.Open(f, info.Size())
 	if err != nil {
 		f.Close()
-		return nil, kind, err
+		return nil, kind, ro, err
 	}
-	return closeWith{fsys, f}, kind, nil
+	return closeWith{fsys, f}, kind, ro, nil
+}
+
+// openImageFile opens the image for what it will be used for, and says which
+// it got.
+//
+// It used to be os.Open, which is read-only -- and a share served from it was
+// announced READ-WRITE. A person mounted it, the client offered the actions,
+// and every write failed with a permission error from deep inside a driver:
+// the failure mode this server takes trouble to avoid everywhere else. It was
+// found by mounting it, because *os.File has a WriteAt method whichever way it
+// was opened, so nothing in Go's types says no.
+//
+// A file that cannot be opened for writing is served read-only rather than not
+// at all -- an image on a read-only medium, or one somebody else owns, is
+// still worth reading -- and the caller says so on the way past.
+func openImageFile(path string, readOnly bool) (*os.File, bool, error) {
+	if !readOnly {
+		if f, err := os.OpenFile(path, os.O_RDWR, 0); err == nil {
+			return f, false, nil
+		}
+	}
+	f, err := os.Open(path)
+	return f, true, err
 }
 
 // closeWith closes the file the driver was reading through, after the driver

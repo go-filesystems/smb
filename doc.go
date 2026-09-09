@@ -77,4 +77,19 @@
 //
 //	mount_smbfs //alice@127.0.0.1:4445/disk /Volumes/disk          # macOS
 //	mount -t cifs //127.0.0.1/disk /mnt -o port=4445,vers=2.1,...   # Linux
+//
+// # Who gets what
+//
+// A share with no lists on it is every authenticated user's, read-write.
+// [AllowUsers] and [WriteUsers] narrow that, and compose:
+//
+//	srv.Share("photos", photos, smb.AllowUsers("alice", "bob"), smb.WriteUsers("alice"))
+//
+// Bob may connect and read; Carol is refused at TREE_CONNECT with
+// ACCESS_DENIED, which a client shows as a permission rather than a missing
+// share. [ReadOnly] outranks both.
+//
+// A reader is told so in the access mask of the reply that grants the share,
+// not one refusal at a time: a client that was granted the write bits offers
+// the actions and fails on each, which looks like a broken share.
 package smb

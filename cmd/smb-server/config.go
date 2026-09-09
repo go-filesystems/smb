@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -29,6 +30,12 @@ import (
 //	  image     = "/srv/photos.img"
 //	  read_only = true
 //	}
+//
+//	share "scratch" {
+//	  image   = "/srv/scratch.img"
+//	  allow   = ["alice", "bob"] # only these two may connect
+//	  writers = ["alice"]        # bob gets it read-only
+//	}
 type config struct {
 	Listen string       `hcl:"listen,optional"`
 	Name   string       `hcl:"name,optional"`
@@ -46,10 +53,16 @@ type userBlock struct {
 }
 
 // A shareBlock is one image, exported under a name.
+//
+// Allow and Writers are who may connect and who may write. Both left out is
+// the old behaviour and the common case: every user gets the share, and gets
+// it read-write unless ReadOnly says otherwise.
 type shareBlock struct {
-	Name     string `hcl:"name,label"`
-	Image    string `hcl:"image"`
-	ReadOnly bool   `hcl:"read_only,optional"`
+	Name     string   `hcl:"name,label"`
+	Image    string   `hcl:"image"`
+	ReadOnly bool     `hcl:"read_only,optional"`
+	Allow    []string `hcl:"allow,optional"`
+	Writers  []string `hcl:"writers,optional"`
 }
 
 // loadConfig reads every file named, and every .hcl file in every directory
@@ -131,6 +144,30 @@ func (c *config) check() error {
 			return fmt.Errorf("user %q has neither a password nor a password_file", u.Name)
 		case u.Password != "" && u.PasswordFile != "":
 			return fmt.Errorf("user %q has both a password and a password_file: say which one", u.Name)
+		}
+	}
+	// A name in allow or writers that belongs to nobody is a typo, and a typo
+	// here is silent in the worst way: "alise" in allow locks Alice out of
+	// her own share and the server starts happily. It is checked against the
+	// users rather than trusted, and the message names the share.
+	for _, s := range c.Shares {
+		for _, who := range s.Allow {
+			if !users[who] {
+				return fmt.Errorf("share %q allows %q, who is not a user here", s.Name, who)
+			}
+		}
+		for _, who := range s.Writers {
+			if !users[who] {
+				return fmt.Errorf("share %q lets %q write, who is not a user here", s.Name, who)
+			}
+			// A writer who may not connect never writes. Saying which of the
+			// two lists is wrong is the reader's job, not ours.
+			if len(s.Allow) > 0 && !slices.Contains(s.Allow, who) {
+				return fmt.Errorf("share %q lets %q write but does not allow them to connect", s.Name, who)
+			}
+		}
+		if s.ReadOnly && len(s.Writers) > 0 {
+			return fmt.Errorf("share %q is read_only and also lists writers: read_only wins, so say one or the other", s.Name)
 		}
 	}
 	return nil

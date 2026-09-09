@@ -70,12 +70,12 @@ func opened(t *testing.T, fsys filesystem.Filesystem, path string, ro bool) (*co
 	t.Helper()
 	c := newConn(New(), nil)
 	sh := &share{name: "disk", fsys: fsys, ro: ro}
-	c.trees[1] = sh
+	c.trees[1] = &treeConn{sh: sh, ro: ro}
 	st, err := fsys.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	of := &openFile{path: path, share: sh, dir: isDir(st)}
+	of := &openFile{path: path, share: sh, ro: ro, dir: isDir(st)}
 	of.id[0] = 1
 	c.files[of.id] = of
 	c.lastFile = of.id

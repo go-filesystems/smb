@@ -46,6 +46,12 @@ type openFile struct {
 	dir           bool
 	deleteOnClose bool
 
+	// ro is read-only for THIS handle: the share's own answer plus the one
+	// for the user who connected the tree (see access.go). Every refusal and
+	// every read-only bit in a reply reads this rather than share.ro, so two
+	// people holding the same share get their own answer.
+	ro bool
+
 	// f is the driver's positional handle when it has one. A driver without
 	// Opener leaves this nil and the whole-file path is used instead, which is
 	// O(size) per request and is why the probe exists.
@@ -74,10 +80,11 @@ func (c *conn) fileByID(b []byte) *openFile {
 
 // create opens or makes a file, and is where most of a mount's decisions are.
 func (c *conn) create(h header, body []byte, msg []byte) ([]byte, error) {
-	sh := c.tree(h)
-	if sh == nil {
+	tc := c.tree(h)
+	if tc == nil {
 		return errorResponse(h, statusNetworkNameDeleted), nil
 	}
+	sh := tc.sh
 	if sh.ipc {
 		// There are no pipes behind IPC$ here. Saying so by name is what lets
 		// a client fall back; it is asking for \srvsvc or \wkssvc, and it
@@ -103,7 +110,7 @@ func (c *conn) create(h header, body []byte, msg []byte) ([]byte, error) {
 	}
 
 	writing := disposition != dispOpen
-	if writing && sh.ro {
+	if writing && tc.ro {
 		return errorResponse(h, statusMediaWriteProtected), nil
 	}
 
@@ -160,7 +167,7 @@ func (c *conn) create(h header, body []byte, msg []byte) ([]byte, error) {
 		return errorResponse(h, statusNotADirectory), nil
 	}
 
-	of := &openFile{path: p, share: sh, dir: dir, deleteOnClose: options&optDeleteOnClose != 0}
+	of := &openFile{path: p, share: sh, ro: tc.ro, dir: dir, deleteOnClose: options&optDeleteOnClose != 0}
 	if !dir {
 		if o, canOpen := sh.fsys.(filesystem.Opener); canOpen {
 			if f, err := o.OpenFile(p); err == nil {
@@ -193,7 +200,7 @@ func (c *conn) create(h header, body []byte, msg []byte) ([]byte, error) {
 	size := sizeOf(st)
 	binary.LittleEndian.PutUint64(rb[40:], allocationOf(size))
 	binary.LittleEndian.PutUint64(rb[48:], size)
-	binary.LittleEndian.PutUint32(rb[56:], attributesOf(st, sh.ro))
+	binary.LittleEndian.PutUint32(rb[56:], attributesOf(st, tc.ro))
 	copy(rb[64:], of.id[:])
 	// The contexts offset stays ZERO because there are none. Pointing it at
 	// the one pad byte the structure size accounts for is what a real client
@@ -233,7 +240,7 @@ func (c *conn) closeFile(h header, body []byte) ([]byte, error) {
 	// directories all day -- which is what a file manager does -- would
 	// otherwise leave one behind each time.
 	delete(c.searches, of.id)
-	if of.deleteOnClose && !of.share.ro {
+	if of.deleteOnClose && !of.ro {
 		if of.dir {
 			of.share.fsys.DeleteDir(of.path)
 		} else {
@@ -323,7 +330,7 @@ func (c *conn) write(h header, body []byte, msg []byte) ([]byte, error) {
 	if of == nil {
 		return errorResponse(h, statusFileClosed), nil
 	}
-	if of.share.ro {
+	if of.ro {
 		return errorResponse(h, statusMediaWriteProtected), nil
 	}
 	if of.dir {

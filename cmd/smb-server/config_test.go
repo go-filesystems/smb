@@ -114,6 +114,47 @@ func TestConfigurationsThatCannotWork(t *testing.T) {
 			"user \"a\" {\n  password = \"x\"\n  password_file = \"/p\"\n}\nshare \"s\" { image = \"/i\" }",
 			"say which one",
 		},
+		{
+			// The dangerous one: the server would start, and Alice would be
+			// locked out of her own share by a typo.
+			"allow names somebody who is not a user",
+			`user "alice" { password = "x" }
+			 share "s" {
+			   image = "/i"
+			   allow = ["alise"]
+			 }`,
+			`allows "alise", who is not a user`,
+		},
+		{
+			"writers names somebody who is not a user",
+			`user "alice" { password = "x" }
+			 share "s" {
+			   image   = "/i"
+			   writers = ["bob"]
+			 }`,
+			`lets "bob" write, who is not a user`,
+		},
+		{
+			"a writer who may not connect",
+			`user "alice" { password = "x" }
+			 user "bob" { password = "y" }
+			 share "s" {
+			   image   = "/i"
+			   allow   = ["alice"]
+			   writers = ["bob"]
+			 }`,
+			"does not allow them to connect",
+		},
+		{
+			"read_only and writers at once",
+			`user "alice" { password = "x" }
+			 share "s" {
+			   image     = "/i"
+			   read_only = true
+			   writers   = ["alice"]
+			 }`,
+			"say one or the other",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -212,5 +253,89 @@ func TestDefaultShareName(t *testing.T) {
 		if got := defaultShareName(tc.in); got != tc.want {
 			t.Errorf("defaultShareName(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// Who may connect and who may write, read from the file and carried through.
+func TestAShareCanNameWhoMayUseIt(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "c.hcl", `
+user "alice" { password = "a" }
+user "bob"   { password = "b" }
+
+share "shared" {
+  image   = "/srv/shared.img"
+  allow   = ["alice", "bob"]
+  writers = ["alice"]
+}
+
+share "open" {
+  image = "/srv/open.img"
+}
+`)
+	cfg, err := loadConfig([]string{dir})
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+	shared, open := cfg.Shares[0], cfg.Shares[1]
+	if strings.Join(shared.Allow, ",") != "alice,bob" {
+		t.Errorf("allow = %v", shared.Allow)
+	}
+	if strings.Join(shared.Writers, ",") != "alice" {
+		t.Errorf("writers = %v", shared.Writers)
+	}
+	// Both lists left out is the common case and must stay empty rather than
+	// become a list of everybody: empty is what the server reads as "anyone".
+	if len(open.Allow) != 0 || len(open.Writers) != 0 {
+		t.Errorf("a share that named nobody came back with %v and %v", open.Allow, open.Writers)
+	}
+}
+
+// An image is opened for what it will be used for.
+//
+// os.Open is read-only, and *os.File has a WriteAt method whichever way it was
+// opened -- so a share served from one was announced read-write and refused
+// every write from deep inside a driver. The test is a file that cannot be
+// written: the answer must be "read-only", not "read-write and sorry later".
+func TestAnImageIsOpenedForWhatItIsFor(t *testing.T) {
+	dir := t.TempDir()
+	rw := write(t, dir, "rw.img", "not really an image")
+	ro := write(t, dir, "ro.img", "not really an image")
+	if err := os.Chmod(ro, 0o400); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		path     string
+		asked    bool // read_only in the configuration
+		wantRO   bool
+		wantOpen bool
+	}{
+		{"a writable image, wanted writable", rw, false, false, true},
+		{"a writable image, wanted read-only", rw, true, true, true},
+		{"an unwritable image, wanted writable", ro, false, true, true},
+		{"an unwritable image, wanted read-only", ro, true, true, true},
+		{"an image that is not there", filepath.Join(dir, "nope.img"), false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, gotRO, err := openImageFile(tc.path, tc.asked)
+			if (err == nil) != tc.wantOpen {
+				t.Fatalf("opening: %v", err)
+			}
+			if f != nil {
+				defer f.Close()
+			}
+			if gotRO != tc.wantRO {
+				t.Errorf("read-only = %v, want %v", gotRO, tc.wantRO)
+			}
+			if err != nil || gotRO {
+				return
+			}
+			// The one that says it may write must actually write.
+			if _, err := f.WriteAt([]byte("x"), 0); err != nil {
+				t.Errorf("the handle called writable refused a write: %v", err)
+			}
+		})
 	}
 }
