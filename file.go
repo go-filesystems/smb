@@ -84,6 +84,9 @@ func (c *conn) create(h header, body []byte, msg []byte) ([]byte, error) {
 		// carries on without them.
 		return errorResponse(h, statusObjectNameNotFound), nil
 	}
+	// CREATE stats, may write, stats again and opens. Two clients creating the
+	// same file would otherwise both find it missing.
+	defer sh.changing()()
 	if len(body) < 56 {
 		return nil, fmt.Errorf("smb: CREATE body of %d bytes is too short", len(body))
 	}
@@ -103,6 +106,11 @@ func (c *conn) create(h header, body []byte, msg []byte) ([]byte, error) {
 	if writing && sh.ro {
 		return errorResponse(h, statusMediaWriteProtected), nil
 	}
+
+	// SMB is caseless and this server says so; the driver underneath may not
+	// be. See casefold.go: the name is taken as it came unless nothing is
+	// there under it.
+	p = resolveCase(sh.fsys, p)
 
 	st, statErr := sh.fsys.Stat(p)
 	exists := statErr == nil
@@ -214,6 +222,7 @@ func (c *conn) closeFile(h header, body []byte) ([]byte, error) {
 		of.f.Close()
 	}
 	delete(c.files, of.id)
+	defer of.share.changing()() // the file may go with the handle
 	// The listing this handle was paging through goes with it. It holds a Stat
 	// for every entry in the directory, and a client that opens and closes
 	// directories all day -- which is what a file manager does -- would
@@ -248,6 +257,7 @@ func (c *conn) read(h header, body []byte) ([]byte, error) {
 	if of.dir {
 		return errorResponse(h, statusInvalidDeviceRequest), nil
 	}
+	defer of.share.reading()()
 	if length > maxReadSize {
 		length = maxReadSize
 	}
@@ -312,6 +322,7 @@ func (c *conn) write(h header, body []byte, msg []byte) ([]byte, error) {
 		return nil, fmt.Errorf("smb: the write payload is not inside the message")
 	}
 	data := msg[dataOff : dataOff+length]
+	defer of.share.changing()()
 
 	if of.w != nil {
 		if _, err := of.w.WriteAt(data, offset); err != nil {
@@ -354,6 +365,7 @@ func (c *conn) write(h header, body []byte, msg []byte) ([]byte, error) {
 func (c *conn) flush(h header, body []byte) ([]byte, error) {
 	if len(body) >= 24 {
 		if of := c.fileByID(body[8:]); of != nil && of.w != nil {
+			defer of.share.changing()()
 			if err := of.w.Sync(); err != nil {
 				return errorResponse(h, statusFor(err, statusAccessDenied)), nil
 			}

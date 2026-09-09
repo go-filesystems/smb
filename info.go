@@ -52,10 +52,13 @@ func (c *conn) queryInfo(h header, body []byte) ([]byte, error) {
 	if of == nil {
 		return errorResponse(h, statusFileClosed), nil
 	}
+	release := of.share.reading()
 	st, err := of.share.fsys.Stat(of.path)
 	if err != nil {
+		release()
 		return errorResponse(h, statusFor(err, statusObjectNameNotFound)), nil
 	}
+	defer release()
 
 	var out []byte
 	switch infoType {
@@ -282,6 +285,7 @@ func (c *conn) setInfo(h header, body []byte, msg []byte) ([]byte, error) {
 	if infoType != infoTypeFile {
 		return errorResponse(h, statusNotSupported), nil
 	}
+	defer of.share.changing()()
 
 	switch class {
 	case fileDispositionInformation:
