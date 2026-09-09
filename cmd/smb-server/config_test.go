@@ -7,6 +7,12 @@ import (
 	"testing"
 )
 
+// hclPath quotes a path the way an HCL string wants it. On Windows a path is
+// full of backslashes, and "C:\Users\alice" is a string with three invalid
+// escape sequences in it -- which is a real thing a person writing this
+// configuration will meet, not only a thing tests meet.
+func hclPath(p string) string { return strings.ReplaceAll(p, `\`, `\\`) }
+
 func write(t *testing.T, dir, name, body string) string {
 	t.Helper()
 	p := filepath.Join(dir, name)
@@ -26,7 +32,7 @@ listen = "0.0.0.0:4445"
 name   = "ATTIC"
 
 user "alice" {
-  password_file = "`+pw+`"
+  password_file = "`+hclPath(pw)+`"
 }
 `)
 	write(t, dir, "20-shares.hcl", `

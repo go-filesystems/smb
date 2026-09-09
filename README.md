@@ -94,6 +94,8 @@ share "photos" {
 smb-server -config /etc/smb.d
 ```
 
+On Windows, a path in an HCL string needs its backslashes doubled — `"C:\\srv\\photos.img"` — or forward slashes, which HCL and Windows both accept. `\U` and `\a` are escape sequences, and a single-backslash path is a syntax error rather than a path.
+
 The files in a directory are **merged**, so a user in one and a share in
 another are the same configuration — and a name defined twice is an error that
 names both places rather than the last one silently winning. A mistake is
