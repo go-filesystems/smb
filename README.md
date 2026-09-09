@@ -75,7 +75,7 @@ operating systems have mounted this; the third is a claim nobody has checked.
 
 ```sh
 go run github.com/go-filesystems/smb/cmd/smb-server@latest \
-    -image disk.img -user alice -password-file pw
+    --image disk.img --user alice --password-file pw
 ```
 
 ```
@@ -113,8 +113,31 @@ share "scratch" {
 ```
 
 ```sh
-smb-server -config /etc/smb.d
+smb-server --config /etc/smb.d
 ```
+
+Before restarting a server people are using, `check` answers the three
+questions the file alone cannot — does it parse, does every image open, and
+what would be served to whom:
+
+```
+$ smb-server check /etc/smb.d
+listening on 0.0.0.0:4445 as "ATTIC"
+
+SHARE    IMAGE                FILESYSTEM  WRITE           WHO MAY CONNECT
+photos   /srv/photos.img      fat32       no (read_only)  anyone who authenticates
+scratch  /srv/scratch.img     ext4        alice           alice and bob
+
+USER   PASSWORD FROM
+alice  /etc/smb/alice.pw
+bob    the configuration file
+
+this configuration can be served
+```
+
+It opens every image read-only and closes it again, so it is safe to run
+against a live server's images — and it never prints a password, only where
+one comes from.
 
 A share is read-write only if the image **can** be opened for writing: one on
 a read-only medium, or one owned by somebody else, is served read-only and

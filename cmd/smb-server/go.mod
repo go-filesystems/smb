@@ -18,6 +18,8 @@ require (
 	github.com/go-filesystems/smb v0.0.0
 	github.com/go-filesystems/squashfs v0.2.2-0.20260909093323-59fa5d6f474b
 	github.com/hashicorp/hcl/v2 v2.24.0
+	github.com/spf13/cobra v1.10.2
+	github.com/spf13/pflag v1.0.9
 )
 
 require (
@@ -27,6 +29,7 @@ require (
 	github.com/go-volumes/gpt v0.0.0-20260831115417-b3069a3ac03a // indirect
 	github.com/go-volumes/safeio v0.0.0-20260831125406-d8f54b2890d4 // indirect
 	github.com/google/go-cmp v0.6.0 // indirect
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.20.0 // indirect
 	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
 	github.com/pierrec/lz4/v4 v4.1.29 // indirect

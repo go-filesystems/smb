@@ -212,10 +212,10 @@ func TestFlagsAndFilesDoNotMix(t *testing.T) {
 	p := write(t, dir, "c.hcl", `user "a" { password = "x" }
 	 share "s" { image = "/i" }`)
 
-	if _, err := configure([]string{p}, "/img", "", "", "", "a:1", "N", false); err == nil {
-		t.Error("-config and -image together were accepted")
+	if _, err := configure(&options{files: []string{p}, image: "/img", addr: "a:1", name: "N"}); err == nil {
+		t.Error("--config and --image together were accepted")
 	}
-	cfg, err := configure([]string{p}, "", "", "", "", "127.0.0.1:1", "NAME", false)
+	cfg, err := configure(&options{files: []string{p}, addr: "127.0.0.1:1", name: "NAME"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestFlagsAndFilesDoNotMix(t *testing.T) {
 	}
 
 	// The one-image case: no file, and a share named after the image.
-	cfg, err = configure(nil, "/srv/disk.img", "", "alice", pw, "a:1", "N", true)
+	cfg, err = configure(&options{image: "/srv/disk.img", user: "alice", pwFile: pw, addr: "a:1", name: "N", readOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +236,7 @@ func TestFlagsAndFilesDoNotMix(t *testing.T) {
 	if len(cfg.Users) != 1 || cfg.Users[0].PasswordFile != pw {
 		t.Errorf("the one-image case gave users %+v", cfg.Users)
 	}
-	if _, err := configure(nil, "/img", "", "", "", "a:1", "N", false); err == nil {
+	if _, err := configure(&options{image: "/img", addr: "a:1", name: "N"}); err == nil {
 		t.Error("an image with no user was accepted")
 	}
 }
