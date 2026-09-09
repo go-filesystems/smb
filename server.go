@@ -43,6 +43,12 @@ type share struct {
 	fsys filesystem.Filesystem
 	ro   bool
 
+	// locks are the byte ranges applications have reserved on this share.
+	// They belong to the share rather than to a connection because that is
+	// the whole point of them: they are how two clients keep out of each
+	// other's way.
+	locks lockTable
+
 	// mu serialises the driver.
 	//
 	// A Filesystem promises NOTHING about concurrent path-based calls --
@@ -288,6 +294,9 @@ func (c *conn) serve() {
 			if of.f != nil {
 				of.f.Close()
 			}
+			// A client that crashes holding a lock must not keep the file
+			// reserved for the life of the server.
+			of.share.locks.releaseAll(of.id)
 		}
 	}()
 	for {
@@ -467,6 +476,8 @@ func (c *conn) dispatch(msg []byte) ([]byte, error) {
 		return c.setInfo(h, body, msg)
 	case cmdIoctl:
 		return c.ioctl(h, body, msg)
+	case cmdLock:
+		return c.lock(h, body)
 	default:
 		// Everything else is the next tranche. Refusing by name is what lets a
 		// client fall back or report, instead of waiting for a reply that

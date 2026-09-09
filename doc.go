@@ -35,7 +35,16 @@
 // contexts, which change the shape of the exchange itself; naming it without
 // them would promise what is not there. Nor is encryption.
 //
-// Not here: byte-range locks, change notification, alternate data streams,
+// Byte-range locks are here, and enforced: a read crosses a shared lock and
+// stops at an exclusive one, a write stops at either, and a handle never
+// conflicts with itself. What is NOT here is WAITING for one. A client that
+// asks to wait is told LOCK_NOT_GRANTED, the same answer it gets when it asks
+// not to wait, because waiting needs an asynchronous reply and this server
+// reads one message at a time: blocking would stop the waiting client from
+// doing anything else, including releasing the lock somebody else is waiting
+// on.
+//
+// Not here: change notification, alternate data streams,
 // security descriptors, and the DCE/RPC pipe that answers "what shares are
 // there" (so a client must be told the share name rather than browsing for
 // it). Each of those answers by name rather than by silence.

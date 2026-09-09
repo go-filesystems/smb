@@ -48,7 +48,8 @@ named**:
 | signing | **HMAC-SHA256** for 2.x, **AES-CMAC** for 3.x, both implemented here |
 | dialects | 2.1, 3.0 and 3.0.2 — Linux mounts with no `vers=` at all, macOS settles on 3.0.2 |
 | encryption and 3.1.1 | **not yet** — 3.1.1 changes the shape of the exchange, and naming it without pre-authentication integrity would promise what is not there |
-| locks, change notification, streams, share enumeration | **not yet**, and each answers by name rather than by silence |
+| byte-range locks | taken, released and **enforced** on reads and writes — but a client that asks to *wait* for one is refused, because waiting needs an asynchronous reply |
+| change notification, streams, share enumeration | **not yet**, and each answers by name rather than by silence |
 
 Windows is the client this package was written for and the one **not yet
 verified**: signing is implemented because Windows 11 requires it, and
