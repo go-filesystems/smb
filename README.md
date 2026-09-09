@@ -39,12 +39,30 @@ named**:
 //127.0.0.1/disk on /mnt type cifs (rw,vers=default,username=alice,…)
 ```
 
+**And with Windows** — the client this was written for. Windows 11 ARM64 25H2,
+`New-SmbMapping`, then `dir`, `type`, a subdirectory, a write, a **rename**, a
+delete, and a 512 KiB copy whose sha256 matches the host's. The client reports
+what it negotiated:
+
+```
+ServerName ShareName Dialect Signed Encrypted
+---------- --------- ------- ------ ---------
+10.0.2.100 IPC$      3.0.2     True     False
+10.0.2.100 shared    3.0.2     True     False
+```
+
+`Signed True` is why signing is implemented: Windows requires it. The per-user
+lists hold there too — a reader's write comes back as "The media is write
+protected", and a share `allow` does not name them as "Access is denied". See
+[docs/verifying-with-windows.md](docs/verifying-with-windows.md) for the recipe
+and the **two traps** that make this hard to do at all.
+
 | | |
 |---|---|
 | dialect negotiation | including the 1996 greeting a modern client still opens with |
 | NTLMv2 over SPNEGO | the password never leaves the server |
 | opening, reading, writing | positional through `Opener`/`WritableFile`, whole-file where a driver has neither |
-| listing, renaming, truncating, deleting | including the chained requests macOS sends on every open |
+| listing, renaming, truncating, deleting | including the chained requests macOS sends on every open, and the ones Windows sends whose FIRST operation is meant to fail |
 | signing | **HMAC-SHA256** for 2.x, **AES-CMAC** for 3.x, both implemented here |
 | dialects | 2.1, 3.0 and 3.0.2 — Linux mounts with no `vers=` at all, macOS settles on 3.0.2 |
 | encryption and 3.1.1 | **not yet** — 3.1.1 changes the shape of the exchange, and naming it without pre-authentication integrity would promise what is not there |
@@ -65,11 +83,20 @@ proxy between the two shows the tree connect to IPC$ and then nothing: the
 pipe is never opened. Serving on 445 needs privilege, so that check is a
 person's to run.
 
-Windows is the client this package was written for and the one **not yet
-verified**: signing is implemented because Windows 11 requires it, and
-`FSCTL_VALIDATE_NEGOTIATE_INFO` because it drops a connection whose answer to
-it is missing — but neither has been put to a real Windows client here. Two
-operating systems have mounted this; the third is a claim nobody has checked.
+Windows found one defect nothing else could, and it is the reason to test
+against an operating system rather than a library: **a chained request whose
+predecessor failed was carried out anyway**. Windows checks that a rename's
+target name is free with a compounded CREATE + CLOSE in one message, and the
+CREATE is *supposed* to fail. The CLOSE that follows carries an all-ones file
+id — "the file the previous operation opened" — and with no such file it
+resolved to whatever the connection opened last: the source file, still held by
+the client. The next `SET_INFO` came back `FILE_CLOSED` and the rename failed
+with "The handle is invalid", about a handle the server had shut behind the
+client's back. macOS and Linux never send a chain whose first operation fails,
+and the Go client never chains at all.
+
+What is still unchecked: this ran through a QEMU guest-forward rather than on
+port 445 itself, and encryption and 3.1.1 are absent whatever the client is.
 
 ## Serving one from the command line
 

@@ -497,6 +497,71 @@ func TestChainedRequestsInheritTheHandle(t *testing.T) {
 	}
 }
 
+// A chained request whose predecessor FAILED is not carried out.
+//
+// This is a rename from Windows, in two messages. Windows checks that the
+// target name is free with a compounded CREATE + CLOSE, and the CREATE is
+// SUPPOSED to fail. The CLOSE that follows carries an all-ones file id --
+// "the file the previous operation opened" -- and there is no such file, so a
+// server that runs it anyway closes whatever this connection opened last: the
+// source file, which the client is still holding. The client's next SET_INFO
+// then comes back FILE_CLOSED and the rename fails with "The handle is
+// invalid", about a handle the server shut behind its back.
+//
+// Nothing else found this. macOS and Linux never send a chain whose first
+// operation fails, and the Go client never chains at all.
+func TestAChainStopsAtTheFirstFailure(t *testing.T) {
+	fs := &tinyFS{body: []byte("hello")}
+	c, of := opened(t, fs, "/file.txt", false)
+	live := of.id
+
+	// CREATE a name that is not there, with FILE_OPEN so it cannot be made.
+	name := utf16le("nothing-here.txt")
+	create := make([]byte, 56)
+	binary.LittleEndian.PutUint32(create[36:], dispOpen)
+	binary.LittleEndian.PutUint16(create[44:], uint16(headerLen+56))
+	binary.LittleEndian.PutUint16(create[46:], uint16(len(name)))
+	first := request(cmdCreate, 1, append(create, name...))
+	for len(first)%8 != 0 {
+		first = append(first, 0)
+	}
+	binary.LittleEndian.PutUint32(first[offNextCommand:], uint32(len(first)))
+
+	closing := make([]byte, 24)
+	copy(closing[8:], allOnesFileID[:])
+	second := request(cmdClose, 0, closing)
+	binary.LittleEndian.PutUint32(second[offFlags:], flagRelatedOps)
+
+	out, err := c.dispatchChain(append(first, second...))
+	if err != nil {
+		t.Fatalf("the chain: %v", err)
+	}
+	h, err := parseHeader(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.status != statusObjectNameNotFound {
+		t.Fatalf("the CREATE answered %#x, want OBJECT_NAME_NOT_FOUND", h.status)
+	}
+	if h.nextCommand == 0 {
+		t.Fatal("a chain of two answered once")
+	}
+	// The same reason twice: the client sees that the chain did not happen,
+	// rather than a success for something that was never done.
+	if st := statusOf(t, out[h.nextCommand:]); st != statusObjectNameNotFound {
+		t.Errorf("the related CLOSE answered %#x, want the CREATE's own status", st)
+	}
+	// And the point of all of it: the live handle is still open.
+	if c.files[live] == nil {
+		t.Error("the related CLOSE shut a handle the client still holds")
+	}
+	// A failed CREATE also leaves no "file the previous operation opened",
+	// so an all-ones id on its own finds nothing rather than that handle.
+	if c.fileByID(allOnesFileID[:]) != nil {
+		t.Error("after a failed CREATE, an all-ones file id still resolves to something")
+	}
+}
+
 // IPC$ is not a share anybody exported, and connecting to it has to succeed:
 // the Linux kernel's client asks for it before it will use a real share, and a
 // refusal costs the whole mount.

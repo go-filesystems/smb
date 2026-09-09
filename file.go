@@ -90,6 +90,11 @@ func (c *conn) create(h header, body []byte, msg []byte) ([]byte, error) {
 		return errorResponse(h, statusNetworkNameDeleted), nil
 	}
 	sh := tc.sh
+	// From here on this CREATE may fail, and if it does there is no "file the
+	// previous operation opened" any more. Clearing it first means an
+	// all-ones file id after a failure finds NOTHING rather than the handle
+	// this connection opened before -- which is somebody's live file.
+	c.lastFile = [16]byte{}
 	// CREATE stats, may write, stats again and opens. Two clients creating the
 	// same file would otherwise both find it missing.
 	defer sh.changing()()
