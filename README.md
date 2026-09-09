@@ -100,90 +100,35 @@ port 445 itself, and encryption and 3.1.1 are absent whatever the client is.
 
 ## Serving one from the command line
 
-```sh
-go run github.com/go-filesystems/smb/cmd/smb-server@latest \
-    --image disk.img --user alice --password-file pw
-```
-
-```
-disk.img (fat32) on \\127.0.0.1:4445\disk
-  macOS:  mount_smbfs //alice@127.0.0.1:4445/disk /Volumes/disk
-  Linux:  sudo mount -t cifs //127.0.0.1/disk /mnt -o port=4445,username=alice
-```
-
-The filesystem inside the image is worked out rather than declared:
-[`go-filesystems/detect`](https://github.com/go-filesystems/detect) reads the
-magic and hands back the driver that owns it — fat32, exfat, ext4, ntfs,
-iso9660, squashfs or hfsplus, all registered the same way. The password comes from a **file**, never a flag: an argument is visible
-in the process list to every user on the machine.
-
-Several images, several people, from HCL — one file or a directory of them:
-
-```hcl
-listen = "0.0.0.0:4445"
-name   = "ATTIC"
-
-user "alice" {
-  password_file = "/etc/smb/alice.pw"
-}
-
-share "photos" {
-  image     = "/srv/photos.img"
-  read_only = true
-}
-
-share "scratch" {
-  image   = "/srv/scratch.img"
-  allow   = ["alice", "bob"] # only these two may connect
-  writers = ["alice"]        # bob gets it read-only
-}
-```
+The command lives in its own product now:
+**[`go-fileshare/fileshare`](https://github.com/go-fileshare/fileshare)**, which
+serves the same images over SMB, NFS and WebDAV from one configuration — the
+same users, the same per-share access, in one place.
 
 ```sh
-smb-server --config /etc/smb.d
+go install -tags nonfs,nowebdav github.com/go-fileshare/fileshare@latest   # SMB only
+
+fileshare --image disk.img --user alice --password-file pw   # one image, now
+fileshare --config /etc/fileshare.d                          # several, with users
+fileshare check /etc/fileshare.d                             # before restarting it
 ```
 
-Before restarting a server people are using, `check` answers the three
-questions the file alone cannot — does it parse, does every image open, and
-what would be served to whom:
+`cmd/smb-server` used to live here and has been removed. Two reasons, and the
+second is the one that matters:
 
-```
-$ smb-server check /etc/smb.d
-listening on 0.0.0.0:4445 as "ATTIC"
+- **It could never be installed.** Its go.mod carried
+  `replace github.com/go-filesystems/smb => ../..` so that it always built
+  against this library's HEAD — and `go install pkg@latest` refuses a module
+  with a replace directive outright. The line in this README telling people to
+  run it was wrong for its whole life.
+- **A person wants to share an image, not to run the SMB one.** Which protocol
+  carries it is a property of the client at the other end. One command that
+  serves an image over SMB, NFS and WebDAV — with one set of users and one set
+  of access rules — is the thing that was actually wanted, and a per-protocol
+  command is that thing minus two protocols.
 
-SHARE    IMAGE                FILESYSTEM  WRITE           WHO MAY CONNECT
-photos   /srv/photos.img      fat32       no (read_only)  anyone who authenticates
-scratch  /srv/scratch.img     ext4        alice           alice and bob
-
-USER   PASSWORD FROM
-alice  /etc/smb/alice.pw
-bob    the configuration file
-
-this configuration can be served
-```
-
-It opens every image read-only and closes it again, so it is safe to run
-against a live server's images — and it never prints a password, only where
-one comes from.
-
-A share is read-write only if the image **can** be opened for writing: one on
-a read-only medium, or one owned by somebody else, is served read-only and
-says which shares it did that to. `os.Open` returns a handle with a `WriteAt`
-method whichever way it was opened, so nothing in Go's types says no — a
-mount is what said no.
-
-A share that names nobody is every user's, read-write — so `allow` and
-`writers` are what you reach for when the server has more than one person on
-it. A name in either list that belongs to no `user` block is refused at
-startup: `allow = ["alise"]` would otherwise lock Alice out of her own share
-and start happily.
-
-On Windows, a path in an HCL string needs its backslashes doubled — `"C:\\srv\\photos.img"` — or forward slashes, which HCL and Windows both accept. `\U` and `\a` are escape sequences, and a single-backslash path is a syntax error rather than a path.
-
-The files in a directory are **merged**, so a user in one and a share in
-another are the same configuration — and a name defined twice is an error that
-names both places rather than the last one silently winning. A mistake is
-reported the way HCL reports one, with the file, the line and the source.
+Building only SMB into it is a build tag, so the binary is not carrying what
+you did not ask for.
 
 ## Serving one from Go
 
