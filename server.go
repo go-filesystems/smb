@@ -365,6 +365,10 @@ func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 		prevAt    = -1 // where the previous reply's header starts, inside out
 		first     header
 		haveFirst bool
+		// prevStatus is what the previous request in this chain answered. A
+		// RELATED request that follows a failure must not be carried out:
+		// see below, and read the rename it cost.
+		prevStatus = statusSuccess
 	)
 	for {
 		h, err := parseHeader(msg)
@@ -388,6 +392,46 @@ func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 			first, haveFirst = h, true
 		}
 
+		// A related request whose predecessor FAILED is not carried out. It
+		// speaks about a file the previous operation did not open, and an
+		// all-ones file id would then resolve to whatever this connection
+		// opened last -- somebody else's live handle.
+		//
+		// This is what a rename from Windows costs. Windows checks the target
+		// name with a compounded CREATE + CLOSE; the CREATE fails with
+		// OBJECT_NAME_NOT_FOUND, as it should, and the CLOSE that follows it
+		// closed the SOURCE file, which the client was still holding. Its next
+		// SET_INFO came back FILE_CLOSED, and the rename failed with "The
+		// handle is invalid" -- a message about a handle the server had shut
+		// behind the client's back. macOS and Linux never send a chain whose
+		// first operation fails, so nothing else here ever saw it.
+		//
+		// The status is the previous one, not an invented one: the client sees
+		// the same reason twice and knows the chain did not happen.
+		if h.flags&flagRelatedOps != 0 && prevStatus != statusSuccess {
+			reply := errorResponse(h, prevStatus)
+			if h.flags&flagSigned != 0 {
+				if sess := c.sessions[binary.LittleEndian.Uint64(one[offSessionID:])]; sess != nil {
+					signMessage(c.dialect, sess.signingKey, reply)
+				}
+			}
+			if prevAt >= 0 {
+				binary.LittleEndian.PutUint32(out[prevAt+offNextCommand:], uint32(len(out)-prevAt))
+			}
+			prevAt = len(out)
+			out = append(out, reply...)
+			if h.nextCommand != 0 {
+				for len(out)%8 != 0 {
+					out = append(out, 0)
+				}
+			}
+			if h.nextCommand == 0 {
+				return out, nil
+			}
+			msg = msg[end:]
+			continue
+		}
+
 		// A signed request is verified before it is read. A signature that
 		// does not check out is not a request from the party that
 		// authenticated, whatever it says in its header.
@@ -408,6 +452,9 @@ func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 			signMessage(c.dialect, sess.signingKey, reply)
 		}
 		if reply != nil {
+			if len(reply) >= headerLen {
+				prevStatus = binary.LittleEndian.Uint32(reply[offStatus:])
+			}
 			if prevAt >= 0 {
 				binary.LittleEndian.PutUint32(out[prevAt+offNextCommand:], uint32(len(out)-prevAt))
 			}

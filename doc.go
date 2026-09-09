@@ -29,7 +29,18 @@
 // reading, writing, listing, renaming, truncating and deleting.
 //
 // That is enough for `mount -t cifs` on Linux -- with no vers= at all -- and
-// for mount_smbfs on macOS, which settles on 3.0.2 signed.
+// for mount_smbfs on macOS, which settles on 3.0.2 signed, and for the Windows
+// redirector, which reports 3.0.2 with Signed True.
+//
+// Several requests can arrive in ONE message, and the ones after the first may
+// say they are RELATED: they carry no session or tree of their own, and an
+// all-ones file id means "the file the previous operation opened". A related
+// request whose predecessor FAILED is refused with the predecessor's status
+// rather than carried out -- there is no such file, and doing it anyway acts on
+// whatever the connection opened last. Windows checks a rename's target with a
+// compounded CREATE + CLOSE whose CREATE is meant to fail; carrying out that
+// CLOSE shut the client's source handle and the rename came back "The handle
+// is invalid".
 //
 // 3.1.1 is not here. It adds pre-authentication integrity and negotiate
 // contexts, which change the shape of the exchange itself; naming it without
