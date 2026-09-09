@@ -2,19 +2,9 @@
 # the module, and `git add -A` sweeps it in. Build to /tmp instead.
 /smb
 /cover.out
-# …and the command's own build output, which `go build ./...` inside its
-# directory leaves next to the source.
-#
-# Named rules do not work here, and this file has the proof: the rule used to
-# say /cmd/smb-server/smb-server, and a 6.5 MB `smbserve` -- the binary of the
-# name the command had BEFORE -- was committed by the same change that did the
-# rename. So this is an allow-list instead: inside a command's directory,
-# nothing is committed unless it is source. A binary cannot slip in under a
-# name nobody thought of, whichever direction the rename goes.
-/cmd/*/*
-!/cmd/*/*.go
-!/cmd/*/*.hcl
-!/cmd/*/*.md
-!/cmd/*/go.mod
-!/cmd/*/go.sum
-!/cmd/*/testdata/
+# The command that used to live in cmd/smb-server is now
+# github.com/go-fileshare/fileshare, so the rules that named its binary went
+# with it. The lesson they carried did not: ignore a directory by ALLOW-LIST,
+# never by the name of the artefact you already met -- a 6.5 MB binary was
+# committed here by the very change that renamed the command, because the new
+# rule named the new name.
