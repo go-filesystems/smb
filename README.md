@@ -59,7 +59,7 @@ operating systems have mounted this; the third is a claim nobody has checked.
 ## Serving one from the command line
 
 ```sh
-go run github.com/go-filesystems/smb/cmd/smbserve@latest \
+go run github.com/go-filesystems/smb/cmd/smb-server@latest \
     -image disk.img -user alice -password-file pw
 ```
 
@@ -73,6 +73,31 @@ The filesystem inside the image is worked out rather than declared:
 [`go-filesystems/detect`](https://github.com/go-filesystems/detect) reads the
 magic. The password comes from a **file**, never a flag: an argument is visible
 in the process list to every user on the machine.
+
+Several images, several people, from HCL — one file or a directory of them:
+
+```hcl
+listen = "0.0.0.0:4445"
+name   = "ATTIC"
+
+user "alice" {
+  password_file = "/etc/smb/alice.pw"
+}
+
+share "photos" {
+  image     = "/srv/photos.img"
+  read_only = true
+}
+```
+
+```sh
+smb-server -config /etc/smb.d
+```
+
+The files in a directory are **merged**, so a user in one and a share in
+another are the same configuration — and a name defined twice is an error that
+names both places rather than the last one silently winning. A mistake is
+reported the way HCL reports one, with the file, the line and the source.
 
 ## Serving one from Go
 

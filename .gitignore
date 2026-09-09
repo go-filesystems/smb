@@ -2,3 +2,7 @@
 # the module, and `git add -A` sweeps it in. Build to /tmp instead.
 /smb
 /cover.out
+# …and the command's own build output, which `go build ./...` inside its
+# directory leaves next to the source. The names are listed because that is
+# what this file can do; the remedy is `go build -o /tmp/...` from the start.
+/cmd/smb-server/smb-server

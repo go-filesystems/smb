@@ -151,7 +151,7 @@ jobs:
   # module's `go build ./...` stops at its go.mod. It pulls in the drivers,
   # which is exactly why it is separate -- and exactly why it needs a lane.
   command:
-    name: smbserve (${{ matrix.os }})
+    name: smb-server (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -164,8 +164,10 @@ jobs:
           go-version: stable
           check-latest: true
           cache: true
-          cache-dependency-path: cmd/smbserve/go.sum
+          cache-dependency-path: cmd/smb-server/go.sum
       - run: go vet ./...
-        working-directory: cmd/smbserve
+        working-directory: cmd/smb-server
       - run: go build ./...
-        working-directory: cmd/smbserve
+        working-directory: cmd/smb-server
+      - run: go test -count=1 ./...
+        working-directory: cmd/smb-server
