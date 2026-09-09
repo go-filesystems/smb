@@ -65,7 +65,7 @@ func (c *conn) queryInfo(h header, body []byte) ([]byte, error) {
 	case infoTypeFile:
 		out = fileInfo(class, of, st)
 	case infoTypeFilesystem:
-		out = fsInfo(class, of.share)
+		out = fsInfo(class, of.share, of.ro)
 	case infoTypeSecurity:
 		// A security descriptor is a whole model this server does not have.
 		// Saying so is better than an empty one, which a client reads as "no
@@ -88,7 +88,7 @@ func (c *conn) queryInfo(h header, body []byte) ([]byte, error) {
 
 func fileInfo(class uint8, of *openFile, st filesystem.Stat) []byte {
 	size := sizeOf(st)
-	attrs := attributesOf(st, of.share.ro)
+	attrs := attributesOf(st, of.ro)
 	switch class {
 	case fileBasicInformation:
 		b := make([]byte, 40)
@@ -122,7 +122,7 @@ func fileInfo(class uint8, of *openFile, st filesystem.Stat) []byte {
 	case fileAccessInformation:
 		b := make([]byte, 4)
 		access := accessAll
-		if of.share.ro {
+		if of.ro {
 			access = accessRead
 		}
 		binary.LittleEndian.PutUint32(b, access)
@@ -177,7 +177,7 @@ func fileInfo(class uint8, of *openFile, st filesystem.Stat) []byte {
 	}
 }
 
-func fsInfo(class uint8, sh *share) []byte {
+func fsInfo(class uint8, sh *share, ro bool) []byte {
 	label := sh.name
 	if l, ok := sh.fsys.(filesystem.LabelReader); ok {
 		if s := l.Label(); s != "" {
@@ -237,7 +237,7 @@ func fsInfo(class uint8, sh *share) []byte {
 			readOnlyVolume      = 0x00080000
 		)
 		attrs := uint32(casePreservedNames | unicodeOnDisk)
-		if sh.ro {
+		if ro {
 			attrs |= readOnlyVolume
 		}
 		binary.LittleEndian.PutUint32(b[0:], attrs)
@@ -275,7 +275,7 @@ func (c *conn) setInfo(h header, body []byte, msg []byte) ([]byte, error) {
 	if of == nil {
 		return errorResponse(h, statusFileClosed), nil
 	}
-	if of.share.ro {
+	if of.ro {
 		return errorResponse(h, statusMediaWriteProtected), nil
 	}
 	if inOff < 0 || inLen < 0 || inOff+inLen > len(msg) {

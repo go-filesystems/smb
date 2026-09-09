@@ -3,6 +3,18 @@
 /smb
 /cover.out
 # …and the command's own build output, which `go build ./...` inside its
-# directory leaves next to the source. The names are listed because that is
-# what this file can do; the remedy is `go build -o /tmp/...` from the start.
-/cmd/smb-server/smb-server
+# directory leaves next to the source.
+#
+# Named rules do not work here, and this file has the proof: the rule used to
+# say /cmd/smb-server/smb-server, and a 6.5 MB `smbserve` -- the binary of the
+# name the command had BEFORE -- was committed by the same change that did the
+# rename. So this is an allow-list instead: inside a command's directory,
+# nothing is committed unless it is source. A binary cannot slip in under a
+# name nobody thought of, whichever direction the rename goes.
+/cmd/*/*
+!/cmd/*/*.go
+!/cmd/*/*.hcl
+!/cmd/*/*.md
+!/cmd/*/go.mod
+!/cmd/*/go.sum
+!/cmd/*/testdata/

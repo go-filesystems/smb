@@ -58,8 +58,7 @@ func (c *conn) treeConnect(h header, body []byte, msg []byte) ([]byte, error) {
 	if strings.EqualFold(name, "IPC$") {
 		c.nextTree++
 		tid := c.nextTree
-		ipc := &share{name: "IPC$", ipc: true, ro: true}
-		c.trees[tid] = ipc
+		c.trees[tid] = &treeConn{sh: &share{name: "IPC$", ipc: true, ro: true}, ro: true}
 		h.treeID = tid
 		return treeConnectResponse(h, shareTypePipe, accessRead), nil
 	}
@@ -69,12 +68,21 @@ func (c *conn) treeConnect(h header, body []byte, msg []byte) ([]byte, error) {
 		// exist" rather than "the server is broken".
 		return errorResponse(h, statusBadNetworkName), nil
 	}
+	// Who is asking decides whether they may, and for what. A user who is not
+	// on the list is refused here rather than at the first file: ACCESS_DENIED
+	// on the connection is what a client shows as "you do not have permission
+	// to use this share".
+	user := c.session(h).user
+	if !sh.mayConnect(user) {
+		return errorResponse(h, statusAccessDenied), nil
+	}
+	ro := sh.readOnlyFor(user)
 	c.nextTree++
 	tid := c.nextTree
-	c.trees[tid] = sh
+	c.trees[tid] = &treeConn{sh: sh, ro: ro}
 
 	access := accessAll
-	if sh.ro {
+	if ro {
 		access = accessRead
 	}
 	h.treeID = tid
@@ -92,7 +100,7 @@ func treeConnectResponse(h header, kind uint8, access uint32) []byte {
 	return b
 }
 
-// tree returns the share a message is addressed to.
-func (c *conn) tree(h header) *share {
+// tree returns the share a message is addressed to, as connected.
+func (c *conn) tree(h header) *treeConn {
 	return c.trees[h.treeID]
 }

@@ -42,6 +42,10 @@ type share struct {
 	name string
 	fsys filesystem.Filesystem
 	ro   bool
+	// allow and writers are who may connect and who may write. See access.go:
+	// empty means everyone who authenticated.
+	allow   []string
+	writers []string
 
 	// locks are the byte ranges applications have reserved on this share.
 	// They belong to the share rather than to a connection because that is
@@ -248,7 +252,7 @@ type conn struct {
 	clientCapabilities uint32
 	nextID             uint64
 	sessions           map[uint64]*session
-	trees              map[uint32]*share
+	trees              map[uint32]*treeConn
 	nextTree           uint32
 	pending            *challenge // the NTLM challenge sent, awaiting its answer
 	spnego             bool       // whether this client wraps its tokens, or sends them bare
@@ -277,7 +281,7 @@ func newConn(s *Server, nc net.Conn) *conn {
 	return &conn{
 		srv: s, nc: nc,
 		sessions: map[uint64]*session{},
-		trees:    map[uint32]*share{},
+		trees:    map[uint32]*treeConn{},
 		files:    map[[16]byte]*openFile{},
 		searches: map[[16]byte]*search{},
 		waiting:  map[uint64]*pendingOp{},

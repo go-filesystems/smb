@@ -88,7 +88,7 @@ func (c *conn) queryDirectory(h header, body []byte, msg []byte) ([]byte, error)
 	lastStart := -1
 	for s.next < len(s.entries) {
 		e := s.entries[s.next]
-		entry := encodeDirEntry(class, e, of.share.ro)
+		entry := encodeDirEntry(class, e, of.ro)
 		if entry == nil {
 			return errorResponse(h, statusInvalidInfoClass), nil
 		}
