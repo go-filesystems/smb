@@ -51,10 +51,14 @@
 // it is ready. CANCEL ends one, and so does closing the handle it was taken
 // on.
 //
-// Not here: alternate data streams,
-// security descriptors, and the DCE/RPC pipe that answers "what shares are
-// there" (so a client must be told the share name rather than browsing for
-// it). Each of those answers by name rather than by silence.
+// A client can also ask what shares there ARE, rather than being told a name:
+// TREE_CONNECT to IPC$, open \srvsvc, and call NetrShareEnum over DCE/RPC.
+// The list is the shares this user may connect to -- see access.go -- and
+// srvsvc.go is the three formats that carry it.
+//
+// Not here: alternate data streams, security descriptors, oplocks and leases
+// (so a client caches nothing), and the other pipes a client may ask for
+// (\wkssvc, \lsarpc). Each of those answers by name rather than by silence.
 //
 // # Serving one
 //

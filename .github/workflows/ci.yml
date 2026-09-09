@@ -133,17 +133,21 @@ jobs:
           check-latest: true
           cache: true
       - name: Install the client's userspace half
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq cifs-utils
-      - name: Mount, list, read, write
-        run: go test -tags livemount -count=1 -run TestLiveMount -v ./...
-      # A skip is not a pass. The test skips when it cannot mount, so the lane
-      # asserts that it actually ran.
-      - name: The test must not have skipped
         run: |
-          out=$(go test -tags livemount -count=1 -run TestLiveMount -v ./... 2>&1)
+          sudo apt-get update -qq
+          # cifs-utils for the kernel client's mount, smbclient for the
+          # question a mount cannot ask: what shares are there.
+          sudo apt-get install -y -qq cifs-utils smbclient
+      - name: Mount, list, read, write -- and enumerate
+        run: go test -tags livemount -count=1 -run TestLive -v ./...
+      # A skip is not a pass. The tests skip when they cannot mount or when
+      # smbclient is missing, so the lane asserts that they actually ran.
+      - name: The tests must not have skipped
+        run: |
+          out=$(go test -tags livemount -count=1 -run TestLive -v ./... 2>&1)
           echo "$out"
           if echo "$out" | grep -q -- "--- SKIP"; then
-            echo "::error::the live mount test skipped; this lane proves nothing"
+            echo "::error::a live test skipped; this lane proves nothing"
             exit 1
           fi
 

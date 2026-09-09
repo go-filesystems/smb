@@ -148,3 +148,101 @@ func run(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).CombinedOutput()
 	return string(out), err
 }
+
+// The other half of what a person does with a server: find out what is ON it.
+//
+// The judge here is Samba's own client -- the reference implementation of the
+// client side of srvsvc. `smbclient -L` binds to \srvsvc over SMB2 and calls
+// NetrShareEnum, which is three formats deep (IOCTL, DCE/RPC, NDR) and is
+// where a server that gets one layer wrong hands back something that decodes
+// into nonsense rather than nothing.
+//
+// It also proves the filtering end to end: Bob is not allowed on one of the
+// shares and must not be shown it.
+//
+// macOS cannot be the judge for this one. `smbutil view` binds with an
+// ncacn_np string -- `ncacn_np:HOST[\pipe\srvsvc]` -- which has NO port
+// field, so it dials 445 whatever the URL said. Against a server on a high
+// port it logs "RPC to srvsrvc gave error 0x16c9a034", falls back to the SMB1
+// RAP call, and prints "unable to list resources: Broken pipe". The proxy
+// witness shows the tree connect to IPC$ and then nothing: the pipe is never
+// opened. A privileged port would be needed to test it, which is a person's
+// decision and not a lane's.
+func TestLiveShareEnumeration(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("smbclient is the judge here and the lane that has it is Linux")
+	}
+	if _, err := exec.LookPath("smbclient"); err != nil {
+		t.Skip("smbclient is not installed")
+	}
+
+	srv := fssmb.New()
+	srv.AddUser("alice", "hunter2")
+	srv.AddUser("bob", "swordfish")
+	for _, share := range []struct {
+		name string
+		opts []fssmb.ShareOption
+	}{
+		{"attic", nil},
+		{"photos", nil},
+		{"alices", []fssmb.ShareOption{fssmb.AllowUsers("alice")}},
+	} {
+		if err := srv.Share(share.name, newMemFS(true), share.opts...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve(ln)
+	defer srv.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	dir := t.TempDir()
+	// The credentials go in a FILE, not on the command line: an argument is
+	// visible in the process list to every user on the machine.
+	list := func(user, password string) string {
+		t.Helper()
+		creds := filepath.Join(dir, user+".creds")
+		body := fmt.Sprintf("username = %s\npassword = %s\n", user, password)
+		if err := os.WriteFile(creds, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command("smbclient", "-L", "//127.0.0.1",
+			"-p", fmt.Sprint(port), "-A", creds,
+			"--option=client min protocol=SMB2").CombinedOutput()
+		t.Logf("smbclient -L as %s (err %v):\n%s", user, err, out)
+		if err != nil {
+			t.Fatalf("smbclient could not list the shares as %s: %v", user, err)
+		}
+		return string(out)
+	}
+
+	// Samba prints one share per line, name first after the indent.
+	named := func(out, name string) bool {
+		for _, line := range strings.Split(out, "\n") {
+			if f := strings.Fields(line); len(f) > 0 && f[0] == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	alice := list("alice", "hunter2")
+	for _, name := range []string{"attic", "photos", "alices", "IPC$"} {
+		if !named(alice, name) {
+			t.Errorf("alice was not shown %q", name)
+		}
+	}
+
+	bob := list("bob", "swordfish")
+	for _, name := range []string{"attic", "photos", "IPC$"} {
+		if !named(bob, name) {
+			t.Errorf("bob was not shown %q", name)
+		}
+	}
+	if named(bob, "alices") {
+		t.Error("bob was shown a share he may not connect to")
+	}
+}

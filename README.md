@@ -52,7 +52,18 @@ named**:
 | change notification | on changes that go **through this server** — one made in the image by something else is invisible, because nothing underneath tells us |
 | asynchronous replies | `STATUS_PENDING` with an AsyncId, and `CANCEL` |
 | per-user access | who may connect (`allow`) and who may write (`writers`), per share — a reader is told so in the access mask rather than one refusal at a time |
-| streams, share enumeration, oplocks | **not yet**, and each answers by name rather than by silence |
+| share enumeration | `NetrShareEnum` over DCE/RPC on `\srvsvc`, listing what **this user** may connect to — verified against Samba's own client |
+| streams, oplocks and leases | **not yet**, and each answers by name rather than by silence |
+
+Enumeration is verified with Samba's `smbclient -L`, which is the reference
+implementation of the client side. macOS cannot judge it: `smbutil view` binds
+with `ncacn_np:HOST[\pipe\srvsvc]`, and a named-pipe binding has **no port
+field**, so it dials 445 whatever the URL said — against a server on a high
+port it logs `RPC to srvsrvc gave error 0x16c9a034`, falls back to the SMB1
+`\PIPE\LANMAN` call, and prints "unable to list resources: Broken pipe". A
+proxy between the two shows the tree connect to IPC$ and then nothing: the
+pipe is never opened. Serving on 445 needs privilege, so that check is a
+person's to run.
 
 Windows is the client this package was written for and the one **not yet
 verified**: signing is implemented because Windows 11 requires it, and

@@ -52,13 +52,17 @@ func (c *conn) queryInfo(h header, body []byte) ([]byte, error) {
 	if of == nil {
 		return errorResponse(h, statusFileClosed), nil
 	}
-	release := of.share.reading()
-	st, err := of.share.fsys.Stat(of.path)
-	if err != nil {
-		release()
-		return errorResponse(h, statusFor(err, statusObjectNameNotFound)), nil
+	var st filesystem.Stat = pipeStat
+	if of.pipe == nil {
+		release := of.share.reading()
+		var err error
+		st, err = of.share.fsys.Stat(of.path)
+		if err != nil {
+			release()
+			return errorResponse(h, statusFor(err, statusObjectNameNotFound)), nil
+		}
+		defer release()
 	}
-	defer release()
 
 	var out []byte
 	switch infoType {

@@ -7,14 +7,17 @@ package smb
 // "not a directory" is what makes a file manager show an empty folder rather
 // than an error.
 const (
-	statusSuccess              uint32 = 0x00000000
-	statusPending              uint32 = 0x00000103
-	statusNoMoreFiles          uint32 = 0x80000006
-	statusNotImplemented       uint32 = 0xC0000002
-	statusInvalidInfoClass     uint32 = 0xC0000003
-	statusInvalidParameter     uint32 = 0xC000000D
-	statusNoSuchFile           uint32 = 0xC000000F
-	statusEndOfFile            uint32 = 0xC0000011
+	statusSuccess          uint32 = 0x00000000
+	statusPending          uint32 = 0x00000103
+	statusNoMoreFiles      uint32 = 0x80000006
+	statusNotImplemented   uint32 = 0xC0000002
+	statusInvalidInfoClass uint32 = 0xC0000003
+	statusInvalidParameter uint32 = 0xC000000D
+	statusNoSuchFile       uint32 = 0xC000000F
+	statusEndOfFile        uint32 = 0xC0000011
+	// BUFFER_OVERFLOW is not an error: the high bit is a WARNING, and a
+	// client reads the reply that comes with it and then asks for the rest.
+	statusBufferOverflow       uint32 = 0x80000005
 	statusMoreProcessing       uint32 = 0xC0000016
 	statusAccessDenied         uint32 = 0xC0000022
 	statusObjectNameNotFound   uint32 = 0xC0000034
