@@ -3,9 +3,14 @@
 // Command smb-server exports a disk image over SMB, so it can be mounted by the
 // file manager of macOS, Linux or Windows with nothing installed on the client.
 //
-//	smb-server -image disk.img -user alice -password-file pw
+//	smb-server --image disk.img --user alice --password-file pw
 //	mount_smbfs //alice@127.0.0.1:4445/disk /Volumes/disk           # macOS
 //	mount -t cifs //127.0.0.1/disk /mnt -o port=4445,username=alice  # Linux
+//
+// Several images, with users and per-share access, come from HCL files:
+//
+//	smb-server --config /etc/smb.d
+//	smb-server check /etc/smb.d      # before restarting a server people use
 //
 // The filesystem inside the image is worked out rather than declared:
 // go-filesystems/detect reads the magic and hands back the driver that owns
@@ -13,13 +18,14 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"net"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+
+	"github.com/spf13/cobra"
 
 	"github.com/go-filesystems/detect"
 	filesystem "github.com/go-filesystems/interface"
@@ -35,39 +41,22 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
+	if err := newRootCmd().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "smb-server:", err)
 		os.Exit(1)
 	}
 }
 
-// configFiles collects repeated -config flags.
-type configFiles []string
-
-func (c *configFiles) String() string     { return strings.Join(*c, ", ") }
-func (c *configFiles) Set(v string) error { *c = append(*c, v); return nil }
-
-func run() error {
-	var (
-		files    configFiles
-		image    = flag.String("image", "", "a disk image to export")
-		share    = flag.String("share", "", `the name to export it under (default: the image's file name without its extension)`)
-		addr     = flag.String("addr", "127.0.0.1:4445", "the address to listen on")
-		user     = flag.String("user", "", "the user a client authenticates as")
-		pwFile   = flag.String("password-file", "", "a file holding that user's password")
-		readOnly = flag.Bool("read-only", false, "refuse every write, whatever the image would allow")
-		name     = flag.String("name", "GOFS", "what the server calls itself to a client")
-	)
-	flag.Var(&files, "config", "an HCL file, or a directory of .hcl files, describing shares and users (repeatable)")
-	flag.Usage = usage
-	flag.Parse()
-
-	cfg, err := configure(files, *image, *share, *user, *pwFile, *addr, *name, *readOnly)
+// serve is what the command does: read the configuration, open every image,
+// listen, and hand out shares until it is stopped.
+func serve(cmd *cobra.Command, o *options) error {
+	cfg, err := configure(o)
 	if err != nil {
 		return err
 	}
 
 	registerDrivers()
+	out := cmd.OutOrStdout()
 
 	srv := smb.New()
 	srv.SetName(cfg.Name)
@@ -105,7 +94,7 @@ func run() error {
 			if !s.ReadOnly {
 				// Not what was asked for, so it is said out loud: the share
 				// works, and it will not take a write.
-				fmt.Printf("%s could not be opened for writing: %s is read-only\n", s.Image, s.Name)
+				fmt.Fprintf(out, "%s could not be opened for writing: %s is read-only\n", s.Image, s.Name)
 			}
 		}
 		if len(s.Allow) > 0 {
@@ -128,9 +117,9 @@ func run() error {
 	// :0 they are different, and the one that matters is what a client dials.
 	who := cfg.Users[0].Name
 	for _, s := range shares {
-		fmt.Printf("%s (%s) on \\\\%s\\%s\n", s.path, s.kind, ln.Addr(), s.name)
-		fmt.Printf("  macOS:  mount_smbfs //%s@%s/%s /Volumes/%s\n", who, ln.Addr(), s.name, s.name)
-		fmt.Printf("  Linux:  sudo mount -t cifs //%s/%s /mnt -o port=%s,username=%s\n",
+		fmt.Fprintf(out, "%s (%s) on \\\\%s\\%s\n", s.path, s.kind, ln.Addr(), s.name)
+		fmt.Fprintf(out, "  macOS:  mount_smbfs //%s@%s/%s /Volumes/%s\n", who, ln.Addr(), s.name, s.name)
+		fmt.Fprintf(out, "  Linux:  sudo mount -t cifs //%s/%s /mnt -o port=%s,username=%s\n",
 			host(ln.Addr().String()), s.name, port(ln.Addr().String()), who)
 	}
 
@@ -153,65 +142,39 @@ func run() error {
 // serving a single image should not have to write a file to do it. When files
 // ARE given they own the shares and the users, because a share defined in two
 // places is a question nobody wants to answer at three in the morning.
-func configure(files []string, image, share, user, pwFile, addr, name string, readOnly bool) (*config, error) {
-	if len(files) > 0 {
-		if image != "" || user != "" || pwFile != "" {
-			return nil, fmt.Errorf("-config describes the shares and the users; -image, -user and -password-file do not go with it")
+func configure(o *options) (*config, error) {
+	if len(o.files) > 0 {
+		if o.image != "" || o.user != "" || o.pwFile != "" {
+			return nil, fmt.Errorf("--config describes the shares and the users; --image, --user and --password-file do not go with it")
 		}
-		cfg, err := loadConfig(files)
+		cfg, err := loadConfig(o.files)
 		if err != nil {
 			return nil, err
 		}
 		// The two flags that are about the server rather than about what it
 		// serves fill in what the files left out.
 		if cfg.Listen == "" {
-			cfg.Listen = addr
+			cfg.Listen = o.addr
 		}
 		if cfg.Name == "" {
-			cfg.Name = name
+			cfg.Name = o.name
 		}
 		return cfg, nil
 	}
 
-	if image == "" || user == "" || pwFile == "" {
-		usage()
-		return nil, fmt.Errorf("either -config, or all three of -image, -user and -password-file")
+	if o.image == "" || o.user == "" || o.pwFile == "" {
+		return nil, fmt.Errorf("either --config, or all three of --image, --user and --password-file (--help says more)")
 	}
+	share := o.share
 	if share == "" {
-		share = defaultShareName(image)
+		share = defaultShareName(o.image)
 	}
 	return &config{
-		Listen: addr,
-		Name:   name,
-		Users:  []userBlock{{Name: user, PasswordFile: pwFile}},
-		Shares: []shareBlock{{Name: share, Image: image, ReadOnly: readOnly}},
+		Listen: o.addr,
+		Name:   o.name,
+		Users:  []userBlock{{Name: o.user, PasswordFile: o.pwFile}},
+		Shares: []shareBlock{{Name: share, Image: o.image, ReadOnly: o.readOnly}},
 	}, nil
-}
-
-func usage() {
-	fmt.Fprint(flag.CommandLine.Output(), `smb-server exports disk images over SMB.
-
-One image:
-
-    smb-server -image disk.img -user alice -password-file pw
-
-Several, from HCL:
-
-    smb-server -config /etc/smb.d
-
-    listen = "0.0.0.0:4445"
-
-    user "alice" {
-      password_file = "/etc/smb/alice.pw"
-    }
-
-    share "photos" {
-      image     = "/srv/photos.img"
-      read_only = true
-    }
-
-`)
-	flag.PrintDefaults()
 }
 
 // registerDrivers tells detect what this command can open.
