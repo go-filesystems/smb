@@ -67,6 +67,8 @@ func run() error {
 		return err
 	}
 
+	registerDrivers()
+
 	srv := smb.New()
 	srv.SetName(cfg.Name)
 	for _, u := range cfg.Users {
@@ -201,74 +203,50 @@ Several, from HCL:
 	flag.PrintDefaults()
 }
 
+// registerDrivers tells detect what this command can open.
+//
+// It is a list because every driver now answers to the same name: each has an
+// OpenReader of exactly detect.Opener's shape. Before that it was a switch
+// with a case per driver, because fat32, exfat, ext4 and ntfs could only be
+// opened from a PATH -- and a registration table would have silently covered
+// only the half that could not.
+func registerDrivers() {
+	detect.Register(detect.FAT32, filesystem_fat32.OpenReader)
+	detect.Register(detect.ExFAT, filesystem_exfat.OpenReader)
+	detect.Register(detect.Ext4, filesystem_ext4.OpenReader)
+	detect.Register(detect.NTFS, filesystem_ntfs.OpenReader)
+	detect.Register(detect.ISO9660, filesystem_iso9660.OpenReader)
+	detect.Register(detect.SquashFS, filesystem_squashfs.OpenReader)
+	detect.Register(detect.HFSPlus, hfsplus.OpenReader)
+}
+
 // openImage works out what is inside the image and hands back the driver that
 // owns it.
 //
-// detect reads the magic; the dispatch below is written out rather than
-// registered, because the drivers do not share one entry point: fat32, exfat
-// and ext4 open a PATH (and a partition index), while iso9660, squashfs and
-// hfsplus open a reader and a size. detect.Register only fits the second kind,
-// so a registration table here would silently cover half the list.
+// The file is opened once and read through: detect reads the magic, the driver
+// reads the rest, and the handle is closed by closing the filesystem. Nothing
+// here knows which driver it got, which is the point.
+//
+// An image with a PARTITION TABLE is not handled: detect reads the magic at
+// offset zero and would find the table rather than a filesystem. Open(path,
+// partIndex) in each driver is still the way through one, and teaching detect
+// about partitions is a change to detect.
 func openImage(path string) (filesystem.Filesystem, detect.Type, error) {
-	probe, err := os.Open(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, detect.Unknown, err
 	}
-	info, err := probe.Stat()
+	info, err := f.Stat()
 	if err != nil {
-		probe.Close()
+		f.Close()
 		return nil, detect.Unknown, err
 	}
-	kind, err := detect.Detect(probe, info.Size())
-	probe.Close()
+	fsys, kind, err := detect.Open(f, info.Size())
 	if err != nil {
-		return nil, detect.Unknown, err
+		f.Close()
+		return nil, kind, err
 	}
-
-	// -1 is the whole image: no partition table to look through.
-	const wholeImage = -1
-	switch kind {
-	case detect.FAT32:
-		fsys, err := filesystem_fat32.Open(path, wholeImage)
-		return fsys, kind, err
-	case detect.ExFAT:
-		fsys, err := filesystem_exfat.Open(path, wholeImage)
-		return fsys, kind, err
-	case detect.Ext4:
-		fsys, err := filesystem_ext4.Open(path, wholeImage)
-		return fsys, kind, err
-	case detect.NTFS:
-		fsys, err := filesystem_ntfs.Open(path, wholeImage)
-		return fsys, kind, err
-	case detect.ISO9660, detect.SquashFS, detect.HFSPlus:
-		// These read through a handle that has to outlive this function, so
-		// it is closed by closing the filesystem rather than here.
-		f, err := os.Open(path)
-		if err != nil {
-			return nil, kind, err
-		}
-		info, err := f.Stat()
-		if err != nil {
-			f.Close()
-			return nil, kind, err
-		}
-		var fsys filesystem.Filesystem
-		switch kind {
-		case detect.ISO9660:
-			fsys, err = filesystem_iso9660.Open(f, info.Size())
-		case detect.SquashFS:
-			fsys, err = filesystem_squashfs.Open(f, info.Size())
-		case detect.HFSPlus:
-			fsys, err = hfsplus.Open(f, info.Size())
-		}
-		if err != nil {
-			f.Close()
-			return nil, kind, err
-		}
-		return closeWith{fsys, f}, kind, nil
-	default:
-		return nil, kind, fmt.Errorf("this command cannot open a %s image", kind)
-	}
+	return closeWith{fsys, f}, kind, nil
 }
 
 // closeWith closes the file the driver was reading through, after the driver
