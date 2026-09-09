@@ -37,14 +37,21 @@
 //
 // Byte-range locks are here, and enforced: a read crosses a shared lock and
 // stops at an exclusive one, a write stops at either, and a handle never
-// conflicts with itself. What is NOT here is WAITING for one. A client that
-// asks to wait is told LOCK_NOT_GRANTED, the same answer it gets when it asks
-// not to wait, because waiting needs an asynchronous reply and this server
-// reads one message at a time: blocking would stop the waiting client from
-// doing anything else, including releasing the lock somebody else is waiting
+// conflicts with itself. A client that asks to WAIT for one is promised an
+// answer and gets it when the holder lets go, or STATUS_CANCELLED if it gives
+// up first.
+//
+// Change notification is here too, on the same machinery, with one limit
+// stated where it will be met: the changes reported are the ones that go
+// THROUGH THIS SERVER. A file written into the image by something else is
+// invisible, because nothing underneath tells us.
+//
+// Both work because a reply may now be sent later: an interim STATUS_PENDING
+// with an AsyncId, the loop carrying on reading, and the real answer whenever
+// it is ready. CANCEL ends one, and so does closing the handle it was taken
 // on.
 //
-// Not here: change notification, alternate data streams,
+// Not here: alternate data streams,
 // security descriptors, and the DCE/RPC pipe that answers "what shares are
 // there" (so a client must be told the share name rather than browsing for
 // it). Each of those answers by name rather than by silence.

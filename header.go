@@ -113,6 +113,9 @@ type header struct {
 	messageID    uint64
 	treeID       uint32
 	sessionID    uint64
+	// asyncID is the same eight bytes as treeID and the four before it: a
+	// header is one shape or the other, and the flags say which.
+	asyncID uint64
 }
 
 // parseHeader reads the 64 bytes in front of a message.
@@ -135,6 +138,7 @@ func parseHeader(b []byte) (header, error) {
 	h.nextCommand = binary.LittleEndian.Uint32(b[offNextCommand:])
 	h.messageID = binary.LittleEndian.Uint64(b[offMessageID:])
 	h.treeID = binary.LittleEndian.Uint32(b[offTreeID:])
+	h.asyncID = binary.LittleEndian.Uint64(b[offAsyncID:])
 	h.sessionID = binary.LittleEndian.Uint64(b[offSessionID:])
 	return h, nil
 }
