@@ -573,3 +573,194 @@ func TestClosingAHandleFreesItsListing(t *testing.T) {
 		t.Errorf("the listing outlived the handle: %d left", len(c.searches))
 	}
 }
+
+// Byte-range locks: what an application uses to say "this part of the file is
+// mine for a moment". The rules are simple and the consequences are not, so
+// each one is checked.
+func TestByteRangeLocks(t *testing.T) {
+	fs := &tinyFS{body: make([]byte, 4096)}
+	c, of := opened(t, fs, "/file.txt", false)
+
+	// A second handle on the same file, which is what a second client is from
+	// the lock table's point of view.
+	other := &openFile{path: "/file.txt", share: of.share}
+	other.id[0] = 2
+	c.files[other.id] = other
+
+	ask := func(handle *openFile, off, length uint64, flags uint32) uint32 {
+		body := make([]byte, 24+24)
+		binary.LittleEndian.PutUint16(body[2:], 1)
+		copy(body[8:], handle.id[:])
+		binary.LittleEndian.PutUint64(body[24:], off)
+		binary.LittleEndian.PutUint64(body[32:], length)
+		binary.LittleEndian.PutUint32(body[40:], flags)
+		return statusOf(t, mustDispatch(t, c, cmdLock, body))
+	}
+
+	if st := ask(of, 0, 100, lockExclusive|lockFailImmediately); st != statusSuccess {
+		t.Fatalf("taking a lock answered %#x", st)
+	}
+	// The same handle may extend its own reservation.
+	if st := ask(of, 50, 100, lockExclusive|lockFailImmediately); st != statusSuccess {
+		t.Errorf("a handle conflicted with itself: %#x", st)
+	}
+	// Another handle may not.
+	if st := ask(other, 50, 10, lockExclusive|lockFailImmediately); st != statusLockNotGranted {
+		t.Errorf("an overlapping exclusive lock answered %#x", st)
+	}
+	if st := ask(other, 50, 10, lockShared|lockFailImmediately); st != statusLockNotGranted {
+		t.Errorf("a shared lock over an exclusive one answered %#x", st)
+	}
+	// …but a range that does not overlap is free.
+	if st := ask(other, 1000, 10, lockExclusive|lockFailImmediately); st != statusSuccess {
+		t.Errorf("a lock elsewhere in the file answered %#x", st)
+	}
+
+	// Shared locks coexist.
+	if st := ask(of, 2000, 100, lockShared|lockFailImmediately); st != statusSuccess {
+		t.Fatalf("a shared lock answered %#x", st)
+	}
+	if st := ask(other, 2050, 10, lockShared|lockFailImmediately); st != statusSuccess {
+		t.Errorf("two shared locks did not coexist: %#x", st)
+	}
+	if st := ask(other, 2050, 10, lockExclusive|lockFailImmediately); st != statusLockNotGranted {
+		t.Errorf("an exclusive lock over a shared one answered %#x", st)
+	}
+
+	// Unlocking a range nobody holds says so, rather than succeeding: the two
+	// sides disagree about what is locked.
+	if st := ask(other, 3000, 10, lockUnlock); st != statusRangeNotLocked {
+		t.Errorf("unlocking an unheld range answered %#x", st)
+	}
+	if st := ask(of, 0, 100, lockUnlock); st != statusSuccess {
+		t.Errorf("unlocking answered %#x", st)
+	}
+
+	// Closing a handle drops what it held: nobody has to ask.
+	closeBody := make([]byte, 24)
+	copy(closeBody[8:], of.id[:])
+	if st := statusOf(t, mustDispatch(t, c, cmdClose, closeBody)); st != statusSuccess {
+		t.Fatal("closing failed")
+	}
+	if st := ask(other, 50, 10, lockExclusive|lockFailImmediately); st != statusSuccess {
+		t.Errorf("a lock survived the handle that took it: %#x", st)
+	}
+
+	// Malformed requests are refused rather than half-applied.
+	if st := statusOf(t, mustDispatch(t, c, cmdLock, make([]byte, 24))); st != statusFileClosed {
+		t.Errorf("a lock on no handle answered %#x", st)
+	}
+	body := make([]byte, 24)
+	copy(body[8:], other.id[:])
+	if st := statusOf(t, mustDispatch(t, c, cmdLock, body)); st != statusInvalidParameter {
+		t.Errorf("a request with no elements answered %#x", st)
+	}
+}
+
+// A request for several ranges is applied whole or not at all: a client that
+// asked for three and got two would have no way to know which.
+func TestASplitLockRequestIsUndone(t *testing.T) {
+	fs := &tinyFS{body: make([]byte, 4096)}
+	c, of := opened(t, fs, "/file.txt", false)
+	blocker := &openFile{path: "/file.txt", share: of.share}
+	blocker.id[0] = 9
+	c.files[blocker.id] = blocker
+
+	// Somebody else holds the second of the two ranges.
+	held := make([]byte, 48)
+	binary.LittleEndian.PutUint16(held[2:], 1)
+	copy(held[8:], blocker.id[:])
+	binary.LittleEndian.PutUint64(held[24:], 500)
+	binary.LittleEndian.PutUint64(held[32:], 100)
+	binary.LittleEndian.PutUint32(held[40:], lockExclusive|lockFailImmediately)
+	if st := statusOf(t, mustDispatch(t, c, cmdLock, held)); st != statusSuccess {
+		t.Fatal("the blocking lock was not taken")
+	}
+
+	both := make([]byte, 24+48)
+	binary.LittleEndian.PutUint16(both[2:], 2)
+	copy(both[8:], of.id[:])
+	binary.LittleEndian.PutUint64(both[24:], 0)
+	binary.LittleEndian.PutUint64(both[32:], 100)
+	binary.LittleEndian.PutUint32(both[40:], lockExclusive|lockFailImmediately)
+	binary.LittleEndian.PutUint64(both[48:], 500)
+	binary.LittleEndian.PutUint64(both[56:], 100)
+	binary.LittleEndian.PutUint32(both[64:], lockExclusive|lockFailImmediately)
+	if st := statusOf(t, mustDispatch(t, c, cmdLock, both)); st != statusLockNotGranted {
+		t.Fatalf("a request that could not be granted whole answered %#x", st)
+	}
+
+	// The first range must be free again: the failed request left nothing.
+	free := make([]byte, 48)
+	binary.LittleEndian.PutUint16(free[2:], 1)
+	copy(free[8:], blocker.id[:])
+	binary.LittleEndian.PutUint64(free[24:], 0)
+	binary.LittleEndian.PutUint64(free[32:], 100)
+	binary.LittleEndian.PutUint32(free[40:], lockExclusive|lockFailImmediately)
+	if st := statusOf(t, mustDispatch(t, c, cmdLock, free)); st != statusSuccess {
+		t.Errorf("the half-applied request left a lock behind: %#x", st)
+	}
+}
+
+// A lock that nothing enforces is decoration: a read crosses a shared lock and
+// stops at an exclusive one, and a write stops at either.
+func TestLocksAreEnforcedOnReadsAndWrites(t *testing.T) {
+	fs := &tinyFS{body: []byte("0123456789abcdefghij")}
+	c, of := opened(t, fs, "/file.txt", false)
+	other := &openFile{path: "/file.txt", share: of.share}
+	other.id[0] = 2
+	c.files[other.id] = other
+
+	take := func(handle *openFile, off, length uint64, flags uint32) {
+		t.Helper()
+		body := make([]byte, 48)
+		binary.LittleEndian.PutUint16(body[2:], 1)
+		copy(body[8:], handle.id[:])
+		binary.LittleEndian.PutUint64(body[24:], off)
+		binary.LittleEndian.PutUint64(body[32:], length)
+		binary.LittleEndian.PutUint32(body[40:], flags)
+		if st := statusOf(t, mustDispatch(t, c, cmdLock, body)); st != statusSuccess {
+			t.Fatalf("taking the lock answered %#x", st)
+		}
+	}
+	read := func(handle *openFile, off, length uint64) uint32 {
+		body := make([]byte, 48)
+		binary.LittleEndian.PutUint32(body[4:], uint32(length))
+		binary.LittleEndian.PutUint64(body[8:], off)
+		copy(body[16:], handle.id[:])
+		return statusOf(t, mustDispatch(t, c, cmdRead, body))
+	}
+	write := func(handle *openFile, off, length uint64) uint32 {
+		body := make([]byte, 48+int(length))
+		binary.LittleEndian.PutUint16(body[2:], uint16(headerLen+48))
+		binary.LittleEndian.PutUint32(body[4:], uint32(length))
+		binary.LittleEndian.PutUint64(body[8:], off)
+		copy(body[16:], handle.id[:])
+		return statusOf(t, mustDispatch(t, c, cmdWrite, body))
+	}
+
+	take(of, 0, 8, lockExclusive|lockFailImmediately)
+	if st := read(other, 0, 4); st != statusFileLockConflict {
+		t.Errorf("reading through somebody else's exclusive lock answered %#x", st)
+	}
+	if st := write(other, 0, 4); st != statusFileLockConflict {
+		t.Errorf("writing through somebody else's exclusive lock answered %#x", st)
+	}
+	// The holder itself is not stopped.
+	if st := read(of, 0, 4); st != statusSuccess {
+		t.Errorf("the holder could not read its own locked range: %#x", st)
+	}
+	// Past the range, everyone is free.
+	if st := read(other, 10, 4); st != statusSuccess {
+		t.Errorf("reading outside the lock answered %#x", st)
+	}
+
+	// A shared lock lets readers through and stops writers.
+	take(of, 12, 4, lockShared|lockFailImmediately)
+	if st := read(other, 12, 4); st != statusSuccess {
+		t.Errorf("reading through a shared lock answered %#x", st)
+	}
+	if st := write(other, 12, 4); st != statusFileLockConflict {
+		t.Errorf("writing through a shared lock answered %#x", st)
+	}
+}

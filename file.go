@@ -222,6 +222,7 @@ func (c *conn) closeFile(h header, body []byte) ([]byte, error) {
 		of.f.Close()
 	}
 	delete(c.files, of.id)
+	of.share.locks.releaseAll(of.id)
 	defer of.share.changing()() // the file may go with the handle
 	// The listing this handle was paging through goes with it. It holds a Stat
 	// for every entry in the directory, and a client that opens and closes
@@ -263,6 +264,11 @@ func (c *conn) read(h header, body []byte) ([]byte, error) {
 	}
 	if offset < 0 {
 		return errorResponse(h, statusInvalidParameter), nil
+	}
+	// A lock nobody enforces is decoration. A read may cross a SHARED lock
+	// held by somebody else; an exclusive one stops it.
+	if of.share.locks.held(of.path, uint64(offset), uint64(length), of.id, false) {
+		return errorResponse(h, statusFileLockConflict), nil
 	}
 
 	buf := make([]byte, length)
@@ -322,6 +328,10 @@ func (c *conn) write(h header, body []byte, msg []byte) ([]byte, error) {
 		return nil, fmt.Errorf("smb: the write payload is not inside the message")
 	}
 	data := msg[dataOff : dataOff+length]
+	// A write crosses NO lock held by anybody else, shared or exclusive.
+	if of.share.locks.held(of.path, uint64(offset), uint64(length), of.id, true) {
+		return errorResponse(h, statusFileLockConflict), nil
+	}
 	defer of.share.changing()()
 
 	if of.w != nil {

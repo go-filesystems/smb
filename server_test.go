@@ -208,7 +208,7 @@ func TestADialectWeDoNotSpeak(t *testing.T) {
 // back instead of waiting for a reply that never comes.
 func TestWhatIsNotImplementedSaysSo(t *testing.T) {
 	c := newConn(New(), nil)
-	for _, cmd := range []command{cmdLock, cmdChangeNotify, cmdOplockBreak} {
+	for _, cmd := range []command{cmdChangeNotify, cmdOplockBreak} {
 		out, err := c.dispatch(requestOf(cmd, nil))
 		if err != nil {
 			t.Fatalf("%v: %v", cmd, err)

@@ -35,4 +35,7 @@ const (
 	statusMediaWriteProtected  uint32 = 0xC00000A2
 	statusFileClosed           uint32 = 0xC0000128
 	statusInvalidHandle        uint32 = 0xC0000008
+	statusLockNotGranted       uint32 = 0xC0000055
+	statusRangeNotLocked       uint32 = 0xC000007E
+	statusFileLockConflict     uint32 = 0xC0000054
 )
