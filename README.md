@@ -71,7 +71,8 @@ disk.img (fat32) on \\127.0.0.1:4445\disk
 
 The filesystem inside the image is worked out rather than declared:
 [`go-filesystems/detect`](https://github.com/go-filesystems/detect) reads the
-magic. The password comes from a **file**, never a flag: an argument is visible
+magic and hands back the driver that owns it — fat32, exfat, ext4, ntfs,
+iso9660, squashfs or hfsplus, all registered the same way. The password comes from a **file**, never a flag: an argument is visible
 in the process list to every user on the machine.
 
 Several images, several people, from HCL — one file or a directory of them:
