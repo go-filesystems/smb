@@ -161,23 +161,23 @@ func TestNTLMv2(t *testing.T) {
 		t.Fatal("the challenge is not an NTLM type 2 message")
 	}
 	auth := clientAuth(t, ch, "alice", "WORKGROUP", "hunter2")
-	key, ok := ch.verify(auth, "hunter2")
+	key, ok := ch.verify(auth, credential{password: "hunter2"})
 	if !ok {
 		t.Fatal("the server refused a correct answer")
 	}
 	if len(key) != 16 {
 		t.Errorf("the session key is %d bytes, want 16", len(key))
 	}
-	if _, ok := ch.verify(auth, "not it"); ok {
+	if _, ok := ch.verify(auth, credential{password: "not it"}); ok {
 		t.Error("the server accepted an answer under the wrong password")
 	}
 	// The user name is compared upper-cased and the domain is not: an answer
 	// computed with a lower-case user name is the same answer.
 	lower := clientAuth(t, ch, "ALICE", "WORKGROUP", "hunter2")
-	if _, ok := ch.verify(lower, "hunter2"); !ok {
+	if _, ok := ch.verify(lower, credential{password: "hunter2"}); !ok {
 		t.Error("the case of the user name changed the answer")
 	}
-	if _, ok := ch.verify(&authMessage{user: "alice", ntResponse: []byte{1, 2, 3}}, "hunter2"); ok {
+	if _, ok := ch.verify(&authMessage{user: "alice", ntResponse: []byte{1, 2, 3}}, credential{password: "hunter2"}); ok {
 		t.Error("a response too short to be one was accepted")
 	}
 	if _, err := parseAuth([]byte("nope")); !errors.Is(err, errNotNTLM) {
@@ -208,7 +208,7 @@ func clientAuth(t *testing.T, ch *challenge, user, domain, password string) *aut
 	blob = append(blob, ch.targetInfo...)
 	blob = append(blob, 0, 0, 0, 0)
 
-	mac := hmac.New(md5.New, ntowfv2(user, domain, password))
+	mac := hmac.New(md5.New, ntowfv2(user, domain, credential{password: password}))
 	mac.Write(ch.nonce[:])
 	mac.Write(blob)
 	nt := append(mac.Sum(nil), blob...)

@@ -63,14 +63,14 @@ func (c *conn) sessionSetup(h header, body []byte) ([]byte, error) {
 		if err != nil {
 			return errorResponse(h, statusLogonFailure), nil
 		}
-		password, known := c.srv.password(auth.user)
+		cred, known := c.srv.credentialFor(auth.user)
 		if !known {
 			// The same status for an unknown user as for a wrong password: a
 			// server that distinguishes them tells a stranger which names
 			// exist.
 			return errorResponse(h, statusLogonFailure), nil
 		}
-		key, ok := c.pending.verify(auth, password)
+		key, ok := c.pending.verify(auth, cred)
 		if !ok {
 			return errorResponse(h, statusLogonFailure), nil
 		}

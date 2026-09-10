@@ -94,12 +94,12 @@ func TestNameAndUsers(t *testing.T) {
 	if s.serverName() != "TESTBOX" {
 		t.Errorf("name = %q", s.serverName())
 	}
-	if _, ok := s.password("nobody"); ok {
+	if _, ok := s.credentialFor("nobody"); ok {
 		t.Error("a user nobody added has a password")
 	}
 	s.AddUser("alice", "hunter2")
-	if p, ok := s.password("alice"); !ok || p != "hunter2" {
-		t.Errorf("password = %q, %v", p, ok)
+	if p, ok := s.credentialFor("alice"); !ok || p.password != "hunter2" {
+		t.Errorf("credential = %+v, %v", p, ok)
 	}
 }
 

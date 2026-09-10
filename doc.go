@@ -93,6 +93,20 @@
 //	mount_smbfs //alice@127.0.0.1:4445/disk /Volumes/disk          # macOS
 //	mount -t cifs //127.0.0.1/disk /mnt -o port=4445,vers=2.1,...   # Linux
 //
+// # Where a password comes from
+//
+// [Server.AddUser] takes the password. [Server.AddUserHash] takes its MD4 --
+// the "NT hash" -- which is what a directory keeps when it holds enough for
+// SMB without holding the password: Samba's sambaNTPassword attribute, or a
+// column beside it in a database.
+//
+// It exists because NTLMv2 is a challenge-response. The client never sends the
+// password, so a server must compute MD4(UTF16LE(password)) itself -- which
+// means an LDAP BIND cannot authenticate an SMB session, and neither can a
+// bcrypt. Worth being plain about: the hash IS the credential, and anybody
+// holding it can authenticate as that person exactly as if they held the
+// password.
+//
 // # Who gets what
 //
 // A share with no lists on it is every authenticated user's, read-write.
