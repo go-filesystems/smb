@@ -30,7 +30,7 @@ import (
 type Server struct {
 	mu     sync.Mutex
 	shares map[string]*share
-	users  map[string]string // user name (as sent) -> password
+	users  map[string]credential // user name (as sent) -> what proves them
 	name   string
 	guid   [16]byte
 	lns    []net.Listener
@@ -92,7 +92,7 @@ func ReadOnly() ShareOption { return func(s *share) { s.ro = true } }
 func New() *Server {
 	s := &Server{
 		shares: map[string]*share{},
-		users:  map[string]string{},
+		users:  map[string]credential{},
 		name:   "GOFS",
 		conns:  map[*conn]struct{}{},
 	}
@@ -117,7 +117,49 @@ func (s *Server) SetName(name string) {
 func (s *Server) AddUser(user, password string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.users[user] = password
+	s.users[user] = credential{password: password}
+}
+
+// AddUserHash adds a user whose password this server does not have, only its
+// MD4 -- the "NT hash", which is what a directory keeps: Samba's
+// sambaNTPassword attribute, or a column beside it in a database.
+//
+// It exists because NTLMv2 is a challenge-response. The client never sends the
+// password, so the server must compute MD4(UTF16LE(password)) itself; a site
+// whose people live in LDAP cannot answer that with a bind and cannot answer
+// it with a bcrypt. The hash IS the credential here, which is worth being
+// plain about: anybody holding it can authenticate as that person, exactly as
+// if they held the password. It is not a password hash in the sense a login
+// form means, and storing it does not make a leak less bad.
+//
+// The hash is 16 bytes. A shorter or longer one is refused rather than padded:
+// a mangled hash would fail every login with "wrong password", which is the
+// least useful thing a server could say.
+func (s *Server) AddUserHash(user string, ntHash []byte) error {
+	if len(ntHash) != 16 {
+		return fmt.Errorf("smb: an NT hash is 16 bytes, not %d", len(ntHash))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.users[user] = credential{ntHash: append([]byte(nil), ntHash...)}
+	return nil
+}
+
+// A credential is what a server can prove somebody with: the password, or the
+// MD4 of it. Both end in the same place -- NTOWFv2 is an HMAC keyed by that
+// MD4 -- and the difference is only whether this server ever knew the
+// password.
+type credential struct {
+	password string
+	ntHash   []byte
+}
+
+// key is MD4(UTF16LE(password)), whichever way it arrived.
+func (c credential) key() []byte {
+	if len(c.ntHash) > 0 {
+		return c.ntHash
+	}
+	return md4sum(utf16le(c.password))
 }
 
 // Share exports a filesystem under a name. The name is what appears after the
@@ -164,11 +206,11 @@ func (s *Server) shareByName(name string) *share {
 	return s.shares[strings.ToUpper(name)]
 }
 
-func (s *Server) password(user string) (string, bool) {
+func (s *Server) credentialFor(user string) (credential, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p, ok := s.users[user]
-	return p, ok
+	c, ok := s.users[user]
+	return c, ok
 }
 
 func (s *Server) serverName() string {

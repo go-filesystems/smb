@@ -4,6 +4,7 @@ package smb
 
 import (
 	"encoding/binary"
+	"strings"
 	"testing"
 )
 
@@ -139,5 +140,60 @@ func TestTheAccessListsCompose(t *testing.T) {
 	ReadOnly()(sh)
 	if !sh.readOnlyFor("alice") {
 		t.Error("a read-only share let a writer write")
+	}
+}
+
+// A server can prove somebody from the MD4 of their password -- the "NT hash"
+// -- which is what a directory keeps: Samba's sambaNTPassword, or a column
+// beside it in a database.
+//
+// The judge is a client this project did not write: it computes the same proof
+// from the PASSWORD, so a server that accepts it from the hash alone has the
+// arithmetic right.
+func TestAUserProvedFromAnNTHash(t *testing.T) {
+	srv := New()
+	// alice is added the ordinary way; bob only as a hash, the way a
+	// directory would have him.
+	srv.AddUser("alice", "hunter2")
+	if err := srv.AddUserHash("bob", md4sum(utf16le("swordfish"))); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		hash []byte
+		want string
+	}{
+		{"too short", make([]byte, 15), "16 bytes"},
+		{"too long", make([]byte, 17), "16 bytes"},
+		{"nothing at all", nil, "16 bytes"},
+	} {
+		if err := srv.AddUserHash("mallory", tc.hash); err == nil ||
+			!strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v", tc.name, err)
+		}
+	}
+
+	// Both prove the same way: NTOWFv2 is an HMAC keyed by that MD4, so the
+	// two paths meet before the challenge is ever touched.
+	ch, _, err := newChallenge("GOFS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		user, password string
+		want           bool
+	}{
+		{"alice", "hunter2", true},
+		{"bob", "swordfish", true},
+		{"bob", "hunter2", false},
+	} {
+		cred, ok := srv.credentialFor(tc.user)
+		if !ok {
+			t.Fatalf("%s is not known", tc.user)
+		}
+		auth := clientAuth(t, ch, tc.user, "", tc.password)
+		if _, got := ch.verify(auth, cred); got != tc.want {
+			t.Errorf("%s with %q: accepted = %v, want %v", tc.user, tc.password, got, tc.want)
+		}
 	}
 }

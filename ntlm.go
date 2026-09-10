@@ -173,11 +173,11 @@ func parseAuth(b []byte) (*authMessage, error) {
 // key is HMAC-MD5 over the UPPERCASED user name and the domain AS THE CLIENT
 // SENT IT, so a server that upper-cases the domain too, or that substitutes
 // its own, computes a different key and rejects a correct password.
-func (c *challenge) verify(a *authMessage, password string) ([]byte, bool) {
+func (c *challenge) verify(a *authMessage, cred credential) ([]byte, bool) {
 	if len(a.ntResponse) < 16 {
 		return nil, false
 	}
-	key := ntowfv2(a.user, a.domain, password)
+	key := ntowfv2(a.user, a.domain, cred)
 	proof := a.ntResponse[:16]
 	blob := a.ntResponse[16:]
 	mac := hmac.New(md5.New, key)
@@ -209,9 +209,12 @@ func (c *challenge) verify(a *authMessage, password string) ([]byte, bool) {
 }
 
 // ntowfv2 is HMAC_MD5(MD4(UTF16LE(password)), UTF16LE(upper(user) + domain)).
-func ntowfv2(user, domain, password string) []byte {
-	h := md4sum(utf16le(password))
-	mac := hmac.New(md5.New, h)
+//
+// The key is the MD4, which is why a server that holds only THAT -- from an
+// LDAP directory, say -- can authenticate somebody just as well as one holding
+// the password. See [Server.AddUserHash].
+func ntowfv2(user, domain string, cred credential) []byte {
+	mac := hmac.New(md5.New, cred.key())
 	mac.Write(utf16le(upperASCII(user)))
 	mac.Write(utf16le(domain))
 	return mac.Sum(nil)
