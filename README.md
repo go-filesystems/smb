@@ -1,3 +1,5 @@
+<p align="center"><img src="https://raw.githubusercontent.com/go-filesystems/brand/main/social/go-filesystems-smb.png" alt="go-filesystems/smb" width="720"></p>
+
 # smb
 
 A pure-Go **SMB2** server that exports any
