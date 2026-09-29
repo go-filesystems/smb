@@ -46,6 +46,8 @@ type share struct {
 	// empty means everyone who authenticated.
 	allow   []string
 	writers []string
+	// decide, when set, answers instead of allow and writers. See Access.
+	decide func(user string) (connect, write bool)
 
 	// locks are the byte ranges applications have reserved on this share.
 	// They belong to the share rather than to a connection because that is
@@ -143,6 +145,15 @@ func (s *Server) AddUserHash(user string, ntHash []byte) error {
 	defer s.mu.Unlock()
 	s.users[user] = credential{ntHash: append([]byte(nil), ntHash...)}
 	return nil
+}
+
+// RemoveUser forgets a user: their next authentication fails. A session
+// already established is not cut, as removing an account from a directory
+// does not unmount what somebody already has open.
+func (s *Server) RemoveUser(user string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.users, user)
 }
 
 // A credential is what a server can prove somebody with: the password, or the
