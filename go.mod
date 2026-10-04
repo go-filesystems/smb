@@ -1,6 +1,6 @@
 module github.com/go-filesystems/smb
 
-go 1.26.4
+go 1.27.1
 
 require (
 	github.com/cloudsoda/go-smb2 v0.0.0-20260803221621-0b399b9d036c // indirect
