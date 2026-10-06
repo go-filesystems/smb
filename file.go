@@ -428,9 +428,23 @@ func statusFor(err error, fallback uint32) uint32 {
 		return statusObjectNameCollision
 	case errors.Is(err, os.ErrPermission):
 		return statusAccessDenied
+	case isDiskFull(err):
+		return statusDiskFull
 	case errors.Is(err, io.EOF):
 		return statusEndOfFile
 	default:
 		return fallback
 	}
+}
+
+// isDiskFull reports whether err is the filesystem saying it has no room --
+// no space, no quota left, or a file grown past what it allows -- however
+// many layers of wrapping a driver put around the errno.
+func isDiskFull(err error) bool {
+	for _, target := range diskFullErrnos {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	return false
 }

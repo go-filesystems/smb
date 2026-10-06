@@ -121,4 +121,11 @@
 // A reader is told so in the access mask of the reply that grants the share,
 // not one refusal at a time: a client that was granted the write bits offers
 // the actions and fails on each, which looks like a broken share.
+//
+// # When the disk is full
+//
+// A driver error that is, or wraps, ENOSPC, EDQUOT or EFBIG answers
+// STATUS_DISK_FULL (0xC000007F), as Samba's map_nt_error_from_unix does.
+// EDQUOT deliberately does not answer STATUS_QUOTA_EXCEEDED: Samba notes that
+// Windows applications need DISK_FULL there.
 package smb
