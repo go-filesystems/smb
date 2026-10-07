@@ -181,6 +181,29 @@ func fileInfo(class uint8, of *openFile, st filesystem.Stat) []byte {
 	}
 }
 
+// The allocation unit the size classes count in: 8 sectors of 512 bytes.
+const (
+	sectorsPerUnit = 8
+	bytesPerSector = 512
+	unitBytes      = sectorsPerUnit * bytesPerSector
+)
+
+// units is the share's total and available allocation units.
+//
+// With no capacity known -- go-filesystems has no statfs -- a size is quoted
+// that says "there is room" without inventing a total the driver could
+// contradict: zero free would make a client refuse every write before
+// trying. Available is never more than the total, which a client would
+// show as a negative used.
+func (sh *share) units() (total, avail uint64) {
+	if sh.capacity != nil {
+		if t, a := sh.capacity(); t > 0 {
+			return t / unitBytes, min(a, t) / unitBytes
+		}
+	}
+	return 1 << 20, 1 << 19
+}
+
 func fsInfo(class uint8, sh *share, ro bool) []byte {
 	label := sh.name
 	if l, ok := sh.fsys.(filesystem.LabelReader); ok {
@@ -203,24 +226,22 @@ func fsInfo(class uint8, sh *share, ro bool) []byte {
 		return b
 
 	case fsSizeInformation:
-		// go-filesystems does not report free space. Reporting zero free would
-		// make a client refuse every write before trying, so a size is quoted
-		// that says "there is room" without inventing a total the driver could
-		// contradict.
+		total, avail := sh.units()
 		b := make([]byte, 24)
-		binary.LittleEndian.PutUint64(b[0:], 1<<20) // total units
-		binary.LittleEndian.PutUint64(b[8:], 1<<19) // available
-		binary.LittleEndian.PutUint32(b[16:], 8)    // sectors per unit
-		binary.LittleEndian.PutUint32(b[20:], 512)  // bytes per sector
+		binary.LittleEndian.PutUint64(b[0:], total) // total units
+		binary.LittleEndian.PutUint64(b[8:], avail) // available
+		binary.LittleEndian.PutUint32(b[16:], sectorsPerUnit)
+		binary.LittleEndian.PutUint32(b[20:], bytesPerSector)
 		return b
 
 	case fsFullSizeInformation:
+		total, avail := sh.units()
 		b := make([]byte, 32)
-		binary.LittleEndian.PutUint64(b[0:], 1<<20)
-		binary.LittleEndian.PutUint64(b[8:], 1<<19)
-		binary.LittleEndian.PutUint64(b[16:], 1<<19)
-		binary.LittleEndian.PutUint32(b[24:], 8)
-		binary.LittleEndian.PutUint32(b[28:], 512)
+		binary.LittleEndian.PutUint64(b[0:], total)
+		binary.LittleEndian.PutUint64(b[8:], avail)  // the caller's
+		binary.LittleEndian.PutUint64(b[16:], avail) // the volume's
+		binary.LittleEndian.PutUint32(b[24:], sectorsPerUnit)
+		binary.LittleEndian.PutUint32(b[28:], bytesPerSector)
 		return b
 
 	case fsDeviceInformation:

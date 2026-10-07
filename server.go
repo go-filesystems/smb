@@ -48,6 +48,9 @@ type share struct {
 	writers []string
 	// decide, when set, answers instead of allow and writers. See Access.
 	decide func(user string) (connect, write bool)
+	// capacity is what the size information classes report, or nil for the
+	// placeholder. See WithCapacity and WithCapacityFunc.
+	capacity func() (total, avail uint64)
 
 	// locks are the byte ranges applications have reserved on this share.
 	// They belong to the share rather than to a connection because that is
@@ -87,6 +90,33 @@ type ShareOption func(*share)
 // ReadOnly refuses every write on this share, whatever the driver underneath
 // would have allowed.
 func ReadOnly() ShareOption { return func(s *share) { s.ro = true } }
+
+// WithCapacity sets the total and available byte counts this share reports
+// as its size and free space (FileFsSizeInformation and
+// FileFsFullSizeInformation: what Explorer, Finder and `df` show).
+//
+// A share given neither this nor [WithCapacityFunc] reports a placeholder
+// -- 4 GiB with 2 GiB free -- because the Filesystem contract has no statfs,
+// and zero free would make a client refuse every write before trying. A
+// caller that knows the size (it opened the image) or the free space (it
+// serves a directory, a quota) says so here. A zero total means "unknown"
+// and keeps the placeholder.
+func WithCapacity(total, avail uint64) ShareOption {
+	return WithCapacityFunc(func() (uint64, uint64) { return total, avail })
+}
+
+// WithCapacityFunc is [WithCapacity] asked at every query instead of once:
+// for a share whose free space goes down with every write, or whose quota
+// is resized while it is served.
+//
+// f runs on the connection's goroutine at every size query: it must be safe
+// for concurrent use and must not block, because the client waits for it.
+// A caller whose numbers are slow to obtain keeps the last ones it has and
+// refreshes them elsewhere. Of the two options, the one given last wins; a
+// nil f is the same as never giving either.
+func WithCapacityFunc(f func() (total, avail uint64)) ShareOption {
+	return func(s *share) { s.capacity = f }
+}
 
 // New returns a server with no shares and no users. A server with no users
 // authenticates nobody: SMB has no anonymous mode worth offering, and a client
