@@ -594,6 +594,9 @@ func (c *conn) dispatch(msg []byte) ([]byte, error) {
 		return nil, err
 	}
 	body := msg[headerLen:]
+	if c.dialect != 0 && h.command != cmdNegotiate && creditChargeTooLow(h, body) {
+		return errorResponse(h, statusInvalidParameter), nil
+	}
 	switch h.command {
 	case cmdNegotiate:
 		return c.negotiate(h, body)
