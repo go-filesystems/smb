@@ -153,6 +153,22 @@ Port 445 is the one a client dials without being told, and it needs privilege
 on every operating system — so the examples use a high port, and the mount
 command names it.
 
+### The size a client is told
+
+The filesystem interface has no `statfs`, so a share reports a placeholder
+size (4 GiB, 2 GiB free) unless the caller says otherwise.
+`smb.WithCapacity(total, avail)` sets fixed numbers. `smb.WithCapacityFunc(f)`
+asks `f` at every size query (`FileFsSizeInformation`,
+`FileFsFullSizeInformation`), for a share whose free space or quota changes
+while it is served. `f` must be safe for concurrent use and must not block.
+
+```go
+var total, avail atomic.Uint64 // kept up to date elsewhere
+srv.Share("data", fs, smb.WithCapacityFunc(func() (uint64, uint64) {
+	return total.Load(), avail.Load()
+}))
+```
+
 ## Licence
 
 BSD-3-Clause.
