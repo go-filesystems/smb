@@ -83,6 +83,7 @@ func (c *conn) negotiateResponse(h header, dialect uint16) []byte {
 	binary.LittleEndian.PutUint16(body[0:], 65)
 	binary.LittleEndian.PutUint16(body[2:], signingEnabled)
 	binary.LittleEndian.PutUint16(body[4:], dialect)
+	binary.LittleEndian.PutUint32(body[24:], capabilitiesFor(dialect))
 	copy(body[8:24], c.srv.guid[:]) // identity, not a secret -- and stable, because
 	//                                 the validate-negotiate exchange below
 	//                                 compares it against what was sent here
