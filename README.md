@@ -53,6 +53,14 @@ ServerName ShareName Dialect Signed Encrypted
 10.0.2.100 shared    3.0.2     True     False
 ```
 
+**Large reads and writes.** The server claims multi-credit operations
+(`SMB2_GLOBAL_CAP_LARGE_MTU`, since v0.6.0) for 2.1 and 3.x, so a client
+reads and writes up to `MaxReadSize`/`MaxWriteSize` (1 MiB) per request.
+Without the claim, go-smb2 and the Linux kernel client both hold every
+request to 64 KiB. A request whose `CreditCharge` does not pay for what it
+sends or asks for is refused with `STATUS_INVALID_PARAMETER`
+(MS-SMB2 3.3.5.2.5). Measured through go-fileshare/fileshare: about ×2.2.
+
 `Signed True` is why signing is implemented: Windows requires it. The per-user
 lists hold there too — a reader's write comes back as "The media is write
 protected", and a share `allow` does not name them as "Access is denied". See
