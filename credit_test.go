@@ -53,12 +53,19 @@ func TestCreditChargeTooLow(t *testing.T) {
 		{"IOCTL MaxOutputResponse 1 MiB, charge 1", cmdIoctl, 1, field(57, 44, 1<<20), true},
 		{"IOCTL MaxInputResponse 1 MiB, charge 16", cmdIoctl, 16, field(57, 32, 1<<20), false},
 		{"a READ too short to read Length from", cmdRead, 1, make([]byte, 3), false},
+		// 65536 credits, which a uint16 count wraps to zero.
+		{"READ 4 GiB - 1, charge 1", cmdRead, 1, field(49, 4, 0xFFFFFFFF), true},
+		{"READ 4 GiB - 1, charge 65535", cmdRead, 65535, field(49, 4, 0xFFFFFFFF), true},
+		{"IOCTL MaxOutputResponse 4 GiB - 1, charge 1", cmdIoctl, 1, field(57, 44, 0xFFFFFFFF), true},
 		{"ECHO, charge 0", cmdEcho, 0, make([]byte, 4), false},
 	} {
 		h := header{command: tc.cmd, creditCharge: tc.charge}
 		if got := creditChargeTooLow(h, tc.body); got != tc.want {
 			t.Errorf("%s: too low = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+	if n := creditsNeeded(0xFFFFFFFF); n != 65536 {
+		t.Errorf("creditsNeeded(4 GiB - 1) = %d, want 65536", n)
 	}
 	if creditsNeeded(0) != 1 {
 		t.Errorf("creditsNeeded(0) = %d, want 1", creditsNeeded(0))

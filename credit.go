@@ -24,11 +24,15 @@ func capabilitiesFor(dialect uint16) uint32 {
 
 // creditsNeeded is MS-SMB2 3.1.5.2's formula: one credit per 64 KiB of the
 // larger of what the request sends and the most its response may carry.
-func creditsNeeded(size uint32) uint16 {
+//
+// It is a uint32 on purpose. A size near 4 GiB needs 65536 credits, which
+// is 0 as a uint16: a request asking for that much while paying one credit
+// passed the check below, until v0.6.1.
+func creditsNeeded(size uint32) uint32 {
 	if size == 0 {
 		return 1
 	}
-	return uint16((size-1)/65536 + 1)
+	return (size-1)/65536 + 1
 }
 
 // creditChargeTooLow applies MS-SMB2 3.3.5.2.5 to one request on a
@@ -63,5 +67,5 @@ func creditChargeTooLow(h header, body []byte) bool {
 	if h.creditCharge == 0 {
 		return size > 65536
 	}
-	return creditsNeeded(size) > h.creditCharge
+	return creditsNeeded(size) > uint32(h.creditCharge)
 }
