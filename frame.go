@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"slices"
 )
 
 // SMB over TCP puts a four-byte header in front of every message: one byte of
@@ -39,12 +40,28 @@ func readFrame(r io.Reader) ([]byte, error) {
 	if n > maxMessageLen {
 		return nil, fmt.Errorf("smb: message of %d bytes is larger than the %d-byte limit", n, maxMessageLen)
 	}
-	body := make([]byte, n)
-	if _, err := io.ReadFull(r, body); err != nil {
-		return nil, err
+	// The buffer follows the bytes that arrive, doubling at most, rather than
+	// the length the header announces: four bytes saying 8 MiB used to cost
+	// 8 MiB at once, before any authentication, for as long as the client
+	// then kept quiet.
+	body := make([]byte, 0, min(n, frameFirstRead))
+	for len(body) < n {
+		if len(body) == cap(body) {
+			body = slices.Grow(body, min(n-len(body), len(body)))
+		}
+		k := min(n, cap(body)) - len(body)
+		start := len(body)
+		body = body[:start+k]
+		if _, err := io.ReadFull(r, body[start:]); err != nil {
+			return nil, err
+		}
 	}
 	return body, nil
 }
+
+// frameFirstRead is what a frame's buffer starts at: every message but a
+// large READ or WRITE fits.
+const frameFirstRead = 64 << 10
 
 // writeFrame writes one message body with its length header. The two are sent
 // as ONE write: a client that reads the header and then blocks on a body that
