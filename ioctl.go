@@ -86,6 +86,23 @@ func (c *conn) ioctl(h header, body []byte, msg []byte) ([]byte, error) {
 		}
 		return ioctlResponse(h, code, out, of.id, status), nil
 
+	case fsctlSrvRequestResumeKey:
+		of := c.fileByID(body[8:])
+		if of == nil {
+			return errorResponse(h, statusFileClosed), nil
+		}
+		return c.resumeKey(h, of), nil
+
+	case fsctlSrvCopyChunk, fsctlSrvCopyChunkWrite:
+		of := c.fileByID(body[8:])
+		if of == nil {
+			return errorResponse(h, statusFileClosed), nil
+		}
+		if inOff < 0 || inLen < 0 || inOff+inLen > len(msg) {
+			return errorResponse(h, statusInvalidParameter), nil
+		}
+		return c.copyChunk(h, code, of, msg[inOff:inOff+inLen]), nil
+
 	case fsctlDfsGetReferrals:
 		// There is no distributed filesystem here, and saying so is what stops
 		// a client looking for one.

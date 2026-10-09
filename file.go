@@ -62,6 +62,12 @@ type openFile struct {
 	// O(size) per request and is why the probe exists.
 	f filesystem.File
 	w filesystem.WritableFile
+
+	// session is the session that opened it, and resumeKey the key a
+	// server-side copy names it by once asked for (copychunk.go).
+	session      uint64
+	resumeKey    [24]byte
+	hasResumeKey bool
 }
 
 // allOnesFileID is how a chained request says "the file the previous operation
@@ -177,7 +183,7 @@ func (c *conn) create(h header, body []byte, msg []byte) ([]byte, error) {
 		return errorResponse(h, statusNotADirectory), nil
 	}
 
-	of := &openFile{path: p, share: sh, ro: tc.ro, dir: dir, deleteOnClose: options&optDeleteOnClose != 0}
+	of := &openFile{path: p, share: sh, ro: tc.ro, dir: dir, deleteOnClose: options&optDeleteOnClose != 0, session: h.sessionID}
 	if !dir {
 		if o, canOpen := sh.fsys.(filesystem.Opener); canOpen {
 			if f, err := o.OpenFile(p); err == nil {
