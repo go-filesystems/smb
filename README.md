@@ -61,6 +61,16 @@ request to 64 KiB. A request whose `CreditCharge` does not pay for what it
 sends or asks for is refused with `STATUS_INVALID_PARAMETER`
 (MS-SMB2 3.3.5.2.5). Measured through go-fileshare/fileshare: about ×2.2.
 
+**Server-side copy.** `FSCTL_SRV_REQUEST_RESUME_KEY` and
+`FSCTL_SRV_COPYCHUNK`/`_WRITE` are answered (since v0.7.0), so a copy within
+a share -- Explorer's, or the Linux client's `copy_file_range(2)` -- is made on
+the server through [`hostcopy`](https://github.com/go-filesystems/hostcopy):
+a megabyte at a time, or `copy_file_range(2)` in the kernel between two files
+of the host, which shares blocks on btrfs and XFS. The bytes never cross the
+network. A request is held to Windows' limits (256 chunks, 1 MiB each, 16 MiB
+in all), a resume key names an open of the same session only, and byte-range
+locks hold as they do for READ and WRITE.
+
 `Signed True` is why signing is implemented: Windows requires it. The per-user
 lists hold there too — a reader's write comes back as "The media is write
 protected", and a share `allow` does not name them as "Access is denied". See
