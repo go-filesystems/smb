@@ -3,7 +3,7 @@ module github.com/go-filesystems/smb
 go 1.27.1
 
 require (
-	github.com/cloudsoda/go-smb2 v0.0.0-20260918041005-0c5d69b69701
+	github.com/cloudsoda/go-smb2 v0.0.0-20261029174947-95daac2ef783
 	github.com/go-filesystems/hostcopy v0.1.0
 	github.com/go-filesystems/interface v0.5.0
 )
