@@ -118,6 +118,18 @@ and the Go client never chains at all.
 What is still unchecked: this ran through a QEMU guest-forward rather than on
 port 445 itself, and encryption and 3.1.1 are absent whatever the client is.
 
+**Sizes a client names are bounded before they are allocated.** Where a
+driver has neither positional writes nor `Truncate`, a WRITE or an
+end-of-file `SET_INFO` rewrites the whole file at its new size, so the client
+chooses the allocation. ⛔ Measured before the bound: one `SET_INFO` with
+end-of-file 2⁶³ panicked the server (`slice bounds out of range`), one with
+2⁶² panicked it (`makeslice: len out of range`), and a WRITE at offset 2³⁸
+was an allocation that would take it down. That path now grows a file by at
+most 8 MiB past its end and to at most 1 GiB, as go-filesystems/nfs does, and
+answers `STATUS_DISK_FULL` beyond; a negative offset or size is
+`STATUS_INVALID_PARAMETER`. A driver with `WritableFile` or `Truncate` is not
+limited by this: its own storage decides.
+
 ## Serving one from the command line
 
 The command lives in its own product now:

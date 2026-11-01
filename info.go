@@ -344,6 +344,11 @@ func (c *conn) setInfo(h header, body []byte, msg []byte) ([]byte, error) {
 			return errorResponse(h, statusInvalidParameter), nil
 		}
 		size := int64(binary.LittleEndian.Uint64(in))
+		// A size above 2^63-1 reads as negative, and the fallback sliced
+		// data[:size] with it: a panic on one request.
+		if size < 0 {
+			return errorResponse(h, statusInvalidParameter), nil
+		}
 		if err := c.truncate(of, size); err != nil {
 			return errorResponse(h, statusFor(err, statusNotSupported)), nil
 		}
@@ -375,6 +380,9 @@ func (c *conn) truncate(of *openFile, size int64) error {
 	// failed.
 	data, err := of.share.fsys.ReadFile(of.path)
 	if err != nil {
+		return err
+	}
+	if err := fallbackGrowth(int64(len(data)), size); err != nil {
 		return err
 	}
 	if int64(len(data)) > size {
