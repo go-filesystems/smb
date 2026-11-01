@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"time"
 
@@ -352,6 +353,12 @@ func (c *conn) write(h header, body []byte, msg []byte) ([]byte, error) {
 	if dataOff < 0 || length < 0 || dataOff+length > len(msg) {
 		return nil, fmt.Errorf("smb: the write payload is not inside the message")
 	}
+	// MS-SMB2 §3.3.5.13: an Offset past what a signed 64-bit file position
+	// holds is STATUS_INVALID_PARAMETER. Unchecked, it went negative here and
+	// the fallback's splice indexed with it.
+	if offset < 0 || offset > math.MaxInt64-int64(length) {
+		return errorResponse(h, statusInvalidParameter), nil
+	}
 	data := msg[dataOff : dataOff+length]
 	// A pipe is written even on IPC$, which is read-only as a share: what the
 	// read-only flag is about is the filesystem, and there is none here.
@@ -387,6 +394,9 @@ func (c *conn) write(h header, body []byte, msg []byte) ([]byte, error) {
 			return errorResponse(h, statusFor(err, statusAccessDenied)), nil
 		}
 		end := offset + int64(len(data))
+		if err := fallbackGrowth(int64(len(old)), end); err != nil {
+			return errorResponse(h, statusFor(err, statusDiskFull)), nil
+		}
 		if int64(len(old)) < end {
 			grown := make([]byte, end)
 			copy(grown, old)
@@ -422,12 +432,39 @@ func (c *conn) flush(h header, body []byte) ([]byte, error) {
 	return simpleResponse(h, statusSuccess, 4), nil
 }
 
+// The fallback that rewrites a whole file (a driver with neither positional
+// writes nor Truncate) materialises the file at its new size, so the size the
+// CLIENT asks for decides the allocation. The bounds are go-filesystems/nfs's
+// for the same path: growth past the current end is limited -- a client
+// writes ahead of the end by a few blocks at most -- and so is the file.
+const (
+	fallbackMaxGrowth = 8 << 20
+	fallbackMaxSize   = 1 << 30
+)
+
+// errFallbackTooLarge is a growth the fallback refuses; statusFor reports it
+// as STATUS_DISK_FULL, as it does EFBIG from a driver.
+var errFallbackTooLarge = errors.New("smb: the file would grow past what rewriting it whole can hold")
+
+// fallbackGrowth refuses an end that the whole-file fallback cannot afford.
+// ⛔ Before it, a WRITE at offset 2^62 or a SET_INFO end-of-file of 2^38 was a
+// make() sized by the client: a runtime panic, or an allocation that took the
+// server down. cur is the current length.
+func fallbackGrowth(cur, end int64) error {
+	if end > cur && (end-cur > fallbackMaxGrowth || end > fallbackMaxSize) {
+		return errFallbackTooLarge
+	}
+	return nil
+}
+
 // statusFor maps a driver's error onto the status a client reads. The default
 // is the caller's, because what "not found" means depends on what was asked.
 func statusFor(err error, fallback uint32) uint32 {
 	switch {
 	case err == nil:
 		return statusSuccess
+	case errors.Is(err, errFallbackTooLarge):
+		return statusDiskFull
 	case errors.Is(err, os.ErrNotExist):
 		return statusObjectNameNotFound
 	case errors.Is(err, os.ErrExist):
