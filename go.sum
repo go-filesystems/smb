@@ -1,7 +1,7 @@
-github.com/cloudsoda/go-smb2 v0.0.0-20261103071945-eb7a6cfa5657 h1:+rl/J5fKkDoeZIQoK7WLa+MpobIVaR4e8D2XYbWiZa0=
-github.com/cloudsoda/go-smb2 v0.0.0-20261103071945-eb7a6cfa5657/go.mod h1:1pQXB0vAlzRlqcY7LYKOOZMw0wKfJPFxTLsJRF2Gswo=
-github.com/cloudsoda/sddl v0.0.0-20250224235906-926454e91efc h1:0xCWmFKBmarCqqqLeM7jFBSw/Or81UEElFqO8MY+GDs=
-github.com/cloudsoda/sddl v0.0.0-20250224235906-926454e91efc/go.mod h1:uvR42Hb/t52HQd7x5/ZLzZEK8oihrFpgnodIJ1vte2E=
+github.com/cloudsoda/go-smb2 v0.0.0-20261105190815-95be04a983b8 h1:lBnZ8FJ6W+ftjYb3Exp5udAlHLLl5J3wO1nStg6abVI=
+github.com/cloudsoda/go-smb2 v0.0.0-20261105190815-95be04a983b8/go.mod h1:LryNlMPoHo2c2K8tlyI/c0OH8yAryg9wPFvgRGmt2pA=
+github.com/cloudsoda/sddl v0.0.0-20261105185302-1c8f96799263 h1:gua/EcVKg9gnxPrSrvHrz3jwrdnrYHKxmynexDwCrto=
+github.com/cloudsoda/sddl v0.0.0-20261105185302-1c8f96799263/go.mod h1:uvR42Hb/t52HQd7x5/ZLzZEK8oihrFpgnodIJ1vte2E=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=

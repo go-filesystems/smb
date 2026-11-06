@@ -3,15 +3,15 @@ module github.com/go-filesystems/smb
 go 1.27.1
 
 require (
-	github.com/cloudsoda/go-smb2 v0.0.0-20261103071945-eb7a6cfa5657
+	github.com/cloudsoda/go-smb2 v0.0.0-20261105190815-95be04a983b8
 	github.com/go-filesystems/hostcopy v0.1.0
+	github.com/go-filesystems/inflight v0.1.0
 	github.com/go-filesystems/interface v0.5.0
 )
 
 require (
-	github.com/cloudsoda/sddl v0.0.0-20250224235906-926454e91efc // indirect
+	github.com/cloudsoda/sddl v0.0.0-20261105185302-1c8f96799263 // indirect
 	github.com/geoffgarside/ber v1.1.0 // indirect
-	github.com/go-filesystems/inflight v0.1.0 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
 	github.com/jcmturner/aescts/v2 v2.0.0 // indirect
 	github.com/jcmturner/dnsutils/v2 v2.0.0 // indirect
