@@ -147,9 +147,9 @@ CHANGE_NOTIFY), whose interim reply is sent by the barrier. WRITE is a barrier
 because it holds the share exclusively anyway. The credits granted are the
 protocol's own window and are unchanged. The mechanism is
 [go-filesystems/inflight](https://github.com/go-filesystems/inflight), shared
-with the NFS and SFTP servers. There is still no timeout on a client that
-sends half a frame and stops (it holds one slot and one token); the NFS server
-bounds that with `RecordTimeout`, and this one does not yet.
+with the NFS and SFTP servers. A client that sends half a frame and stops
+holds its slot and token for at most
+`Server.RecordTimeout` (30 s), and then loses the connection.
 
 ## Serving one from the command line
 

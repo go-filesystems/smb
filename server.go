@@ -11,6 +11,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-filesystems/inflight"
 	filesystem "github.com/go-filesystems/interface"
@@ -50,7 +51,13 @@ type Server struct {
 	// a client that does not read its replies keeps its requests counted.
 	// Set it before the first connection.
 	MaxInFlightTotal int
-	pool             *inflight.Pool // made by the first connection
+	// RecordTimeout bounds how long the rest of a frame may take once its
+	// first byte has arrived: the request holds a slot and a token of the
+	// budget meanwhile. Zero means [DefaultRecordTimeout]; a negative value
+	// disables it. A frame that does not complete in time closes the
+	// connection. Set it before the first connection.
+	RecordTimeout time.Duration
+	pool          *inflight.Pool // made by the first connection
 }
 
 type share struct {
@@ -439,8 +446,19 @@ func (c *conn) serve() {
 		if err != nil {
 			return
 		}
+		// The slot and the token are held while the rest of the frame arrives,
+		// so the time that takes is bounded: a client that sends half a frame
+		// and stops must not hold the server's budget. The deadline is lifted
+		// again afterwards, because waiting for the NEXT frame is not bounded.
+		record := c.srv.recordTimeout()
+		if record > 0 {
+			_ = c.nc.SetReadDeadline(time.Now().Add(record))
+		}
 		pr.reset(c.nc, first[0])
 		msg, err := readFrame(pr)
+		if record > 0 {
+			_ = c.nc.SetReadDeadline(time.Time{})
+		}
 		if err != nil {
 			cn.Abandon(sl)
 			return
