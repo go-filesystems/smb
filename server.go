@@ -7,10 +7,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
 
+	"github.com/go-filesystems/inflight"
 	filesystem "github.com/go-filesystems/interface"
 )
 
@@ -36,6 +38,19 @@ type Server struct {
 	lns    []net.Listener
 	conns  map[*conn]struct{}
 	closed bool
+
+	// MaxInFlight is how many requests one connection may have in progress at
+	// once. Zero means [DefaultMaxInFlight]; a negative value means 1, the
+	// one-request-at-a-time server of v0.7 and before. Set it before the first
+	// connection.
+	MaxInFlight int
+	// MaxInFlightTotal caps the requests in progress across every connection.
+	// Zero or less means [DefaultMaxInFlightTotal]. A request takes its share
+	// before its frame is read and gives it back when its reply is written, so
+	// a client that does not read its replies keeps its requests counted.
+	// Set it before the first connection.
+	MaxInFlightTotal int
+	pool             *inflight.Pool // made by the first connection
 }
 
 type share struct {
@@ -403,20 +418,37 @@ func (c *conn) serve() {
 			c.cancelForFile(of.id)
 		}
 	}()
+	// The error is impossible: the writer is not nil, the order is one of the
+	// two and the width is at least 1.
+	cn, _ := c.srv.inflightPool().NewConn(frameSender{c}, inflight.AnyOrder, c.srv.maxInFlight())
+	// Registered last so that it runs first: requests in flight are answered
+	// (or fail on the closing stream) before the handles they use are closed.
+	defer cn.Wait()
+	pr := &prefixed{}
 	for {
-		msg, err := readFrame(c.nc)
+		if cn.Err() != nil {
+			return
+		}
+		// Wait for the next frame to begin BEFORE taking a slot and a token: a
+		// connection with nothing to say holds nothing of the server's budget.
+		var first [1]byte
+		if _, err := io.ReadFull(c.nc, first[:]); err != nil {
+			return
+		}
+		sl, err := cn.Begin()
 		if err != nil {
 			return
 		}
-		out, err := c.dispatchChain(msg)
+		pr.reset(c.nc, first[0])
+		msg, err := readFrame(pr)
 		if err != nil {
+			cn.Abandon(sl)
 			return
 		}
-		if out == nil {
-			continue
-		}
-		if err := writeFrame(c.nc, out); err != nil {
-			return
+		if span, ok := c.readSpan(msg); ok {
+			cn.Go(sl, span, c.runner(msg))
+		} else {
+			cn.Barrier(sl, c.runner(msg))
 		}
 	}
 }

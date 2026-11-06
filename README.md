@@ -130,6 +130,27 @@ answers `STATUS_DISK_FULL` beyond; a negative offset or size is
 `STATUS_INVALID_PARAMETER`. A driver with `WritableFile` or `Truncate` is not
 limited by this: its own storage decides.
 
+**Concurrent requests (v0.8.0).** A connection answers up to 32 requests at
+once (`Server.MaxInFlight`; -1 is the one-at-a-time server of v0.7) with a
+server-wide ceiling of 128 (`Server.MaxInFlightTotal`), both taken before a
+frame is read, so an idle connection holds nothing and a client that does not
+read its replies keeps its requests counted. Replies leave as they are ready,
+each carrying its own MessageId (MS-SMB2 3.3.1.1: the server accepts requests
+in any order and the client matches by MessageId). What runs beside others is a
+frame holding one READ of a plain file, under the share lock readers already
+shared; everything else is a barrier that waits for the requests before it and
+runs alone, which keeps the connection's tables single-writer. That includes a
+compound chain, answered whole and in order as MS-SMB2 3.3.5.2.7 requires
+("The server MUST handle each individual operation that is described in the
+chain in order"), and the requests that go asynchronous (lock waits,
+CHANGE_NOTIFY), whose interim reply is sent by the barrier. WRITE is a barrier
+because it holds the share exclusively anyway. The credits granted are the
+protocol's own window and are unchanged. The mechanism is
+[go-filesystems/inflight](https://github.com/go-filesystems/inflight), shared
+with the NFS and SFTP servers. There is still no timeout on a client that
+sends half a frame and stops (it holds one slot and one token); the NFS server
+bounds that with `RecordTimeout`, and this one does not yet.
+
 ## Serving one from the command line
 
 The command lives in its own product now:
