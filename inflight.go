@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"time"
 
 	"github.com/go-filesystems/inflight"
 )
@@ -60,6 +61,21 @@ const (
 	// for them is at most about 128 MiB.
 	DefaultMaxInFlightTotal = 128
 )
+
+// DefaultRecordTimeout is how long the rest of a frame may take to arrive once
+// its first byte has: 30 s, as in go-filesystems/nfs.
+const DefaultRecordTimeout = 30 * time.Second
+
+// recordTimeout resolves [Server.RecordTimeout]; zero here means none.
+func (s *Server) recordTimeout() time.Duration {
+	switch {
+	case s.RecordTimeout == 0:
+		return DefaultRecordTimeout
+	case s.RecordTimeout < 0:
+		return 0
+	}
+	return s.RecordTimeout
+}
 
 var errPanic = errors.New("smb: panic answering a request")
 
