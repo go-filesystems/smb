@@ -96,7 +96,7 @@ func fileInfo(class uint8, of *openFile, st filesystem.Stat) []byte {
 	switch class {
 	case fileBasicInformation:
 		b := make([]byte, 40)
-		writeTimes(b)
+		writeTimes(b, timesOf(of.share.fsys, of.path))
 		binary.LittleEndian.PutUint32(b[32:], attrs)
 		return b
 
@@ -141,7 +141,7 @@ func fileInfo(class uint8, of *openFile, st filesystem.Stat) []byte {
 
 	case fileNetworkOpenInformation:
 		b := make([]byte, 56)
-		writeTimes(b)
+		writeTimes(b, timesOf(of.share.fsys, of.path))
 		binary.LittleEndian.PutUint64(b[32:], allocationOf(size))
 		binary.LittleEndian.PutUint64(b[40:], size)
 		binary.LittleEndian.PutUint32(b[48:], attrs)

@@ -41,6 +41,9 @@ type search struct {
 type dirEntry struct {
 	name string
 	st   filesystem.Stat
+	// times is what the filesystem records for the entry, nil when it does not
+	// report any (see timesOf).
+	times *filesystem.FileTimes
 }
 
 // queryDirectory answers one page of a listing.
@@ -128,13 +131,17 @@ func (c *conn) listDir(of *openFile, pattern string) ([]dirEntry, uint32) {
 	if err != nil {
 		return nil, statusFor(err, statusObjectNameNotFound)
 	}
-	parent := self
+	parent, parentPath := self, of.path
 	if of.path != "/" {
 		if st, err := of.share.fsys.Stat(path.Dir(of.path)); err == nil {
-			parent = st
+			parent, parentPath = st, path.Dir(of.path)
 		}
 	}
-	out := []dirEntry{{name: ".", st: self}, {name: "..", st: parent}}
+	fsys := of.share.fsys
+	out := []dirEntry{
+		{name: ".", st: self, times: timesOf(fsys, of.path)},
+		{name: "..", st: parent, times: timesOf(fsys, parentPath)},
+	}
 
 	children, err := of.share.fsys.ListDir(of.path)
 	if err != nil {
@@ -149,7 +156,7 @@ func (c *conn) listDir(of *openFile, pattern string) ([]dirEntry, uint32) {
 		if err != nil {
 			continue // a name that vanished between the listing and the stat
 		}
-		out = append(out, dirEntry{name: name, st: st})
+		out = append(out, dirEntry{name: name, st: st, times: timesOf(fsys, path.Join(of.path, name))})
 	}
 	// A stable order, because a client paging through a listing that reorders
 	// itself between pages sees entries twice or not at all.
@@ -218,7 +225,7 @@ func encodeDirEntry(class uint8, e dirEntry, readOnly bool) []byte {
 		return b
 	}
 
-	writeTimes(b[8:])
+	writeTimes(b[8:], e.times)
 	sz := sizeOf(e.st)
 	binary.LittleEndian.PutUint64(b[40:], sz)
 	binary.LittleEndian.PutUint64(b[48:], allocationOf(sz))
