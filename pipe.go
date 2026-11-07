@@ -65,7 +65,7 @@ func (c *conn) openPipe(h header, name string) ([]byte, error) {
 	rb := b[headerLen:]
 	binary.LittleEndian.PutUint16(rb[0:], 89)
 	binary.LittleEndian.PutUint32(rb[4:], actionOpened)
-	writeTimes(rb[8:])
+	writeTimes(rb[8:], nil)
 	binary.LittleEndian.PutUint32(rb[56:], attrNormal)
 	copy(rb[64:], of.id[:])
 	return b, nil

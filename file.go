@@ -213,7 +213,7 @@ func (c *conn) create(h header, body []byte, msg []byte) ([]byte, error) {
 	rb := b[headerLen:]
 	binary.LittleEndian.PutUint16(rb[0:], 89)
 	binary.LittleEndian.PutUint32(rb[4:], action)
-	writeTimes(rb[8:])
+	writeTimes(rb[8:], timesOf(sh.fsys, p))
 	size := sizeOf(st)
 	binary.LittleEndian.PutUint64(rb[40:], allocationOf(size))
 	binary.LittleEndian.PutUint64(rb[48:], size)
@@ -226,15 +226,56 @@ func (c *conn) create(h header, body []byte, msg []byte) ([]byte, error) {
 	return b, nil
 }
 
-// writeTimes fills the four timestamps a client shows. go-filesystems does not
-// report any of them -- Stat is mode, size and inode -- so they are all the
-// same value, and it is NOW rather than zero: a zero FILETIME is the year 1601,
-// which a file manager displays as a date and a backup tool treats as ancient.
-func writeTimes(b []byte) {
-	t := filetime(time.Now())
-	for i := 0; i < 4; i++ {
-		binary.LittleEndian.PutUint64(b[i*8:], t)
+// timesOf asks the filesystem for the times it records for p, when it can
+// (filesystem.TimesReader). It returns nil when the driver has no such
+// capability or the call fails, and the caller then writes the old fallback.
+func timesOf(fsys filesystem.Filesystem, p string) *filesystem.FileTimes {
+	tr, ok := fsys.(filesystem.TimesReader)
+	if !ok {
+		return nil
 	}
+	ft, err := tr.Times(p)
+	if err != nil {
+		return nil
+	}
+	return &ft
+}
+
+// filetimeOf is a Timestamp as FILETIME. A time that is not recorded, or lies
+// before 1601 and so has no FILETIME, is 0.
+//
+// Zero is what [MS-FSCC] 2.4.7 FILE_BASIC_INFORMATION leaves it: "a valid time
+// for this field is an integer greater than or equal to 0", and 0 is the value
+// that says "not specified" (it means "do not change" when a client sets). A
+// server with no value reports none rather than inventing one.
+func filetimeOf(ts filesystem.Timestamp) uint64 {
+	t, ok := ts.Get()
+	if !ok || t.Year() < 1601 {
+		return 0
+	}
+	return filetime(t)
+}
+
+// writeTimes fills the four timestamps a client shows: CreationTime,
+// LastAccessTime, LastWriteTime and ChangeTime, in that order (FILE_BASIC_INFORMATION).
+//
+// ft is what the filesystem records. Creation is its birth time, and each time
+// the format does not keep is 0, "not specified". With ft nil -- a driver that
+// does not report times -- all four are NOW, as they always were: a zero
+// FILETIME is the year 1601, which a file manager displays as a date and a
+// backup tool treats as ancient.
+func writeTimes(b []byte, ft *filesystem.FileTimes) {
+	if ft == nil {
+		t := filetime(time.Now())
+		for i := 0; i < 4; i++ {
+			binary.LittleEndian.PutUint64(b[i*8:], t)
+		}
+		return
+	}
+	binary.LittleEndian.PutUint64(b[0:], filetimeOf(ft.Btime))
+	binary.LittleEndian.PutUint64(b[8:], filetimeOf(ft.Atime))
+	binary.LittleEndian.PutUint64(b[16:], filetimeOf(ft.Mtime))
+	binary.LittleEndian.PutUint64(b[24:], filetimeOf(ft.Ctime))
 }
 
 func (c *conn) closeFile(h header, body []byte) ([]byte, error) {

@@ -82,6 +82,7 @@ and the **two traps** that make this hard to do at all.
 | dialect negotiation | including the 1996 greeting a modern client still opens with |
 | NTLMv2 over SPNEGO | the password never leaves the server |
 | opening, reading, writing | positional through `Opener`/`WritableFile`, whole-file where a driver has neither |
+| timestamps | a driver with `filesystem.TimesReader` reports its own creation, access, write and change times, in FileBasicInformation, FileNetworkOpenInformation, the directory classes and CREATE; a time the format does not keep (FAT has no change time) is `0`, "not specified" in MS-FSCC, never NOW. A driver without the capability still answers NOW for all four. Setting times is accepted and dropped |
 | listing, renaming, truncating, deleting | including the chained requests macOS sends on every open, and the ones Windows sends whose FIRST operation is meant to fail |
 | signing | **HMAC-SHA256** for 2.x, **AES-CMAC** for 3.x, both implemented here |
 | dialects | 2.1, 3.0 and 3.0.2 — Linux mounts with no `vers=` at all, macOS settles on 3.0.2 |
