@@ -12,7 +12,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	filesystem "github.com/go-filesystems/interface"
 	fssmb "github.com/go-filesystems/smb"
 )
 
@@ -49,9 +51,21 @@ func TestLiveMount(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if err := mem.WriteFile("/sub/zero.txt", []byte("no times"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The filesystem records an mtime for greeting.txt and nothing at all for
+	// zero.txt: the kernel client must show the first and must not crash on, or
+	// invent "now" for, the second.
+	wantMtime := time.Date(2019, 3, 4, 5, 6, 8, 0, time.UTC)
+	timed := timedFS{memFS: mem, times: map[string]filesystem.FileTimes{
+		"/greeting.txt": {Mtime: filesystem.NewTimestamp(wantMtime, 2*time.Second)},
+		"/sub/zero.txt": {},
+	}}
+
 	srv := fssmb.New()
 	srv.AddUser("alice", "hunter2")
-	if err := srv.Share("disk", mem); err != nil {
+	if err := srv.Share("disk", timed); err != nil {
 		t.Fatal(err)
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -112,6 +126,20 @@ func TestLiveMount(t *testing.T) {
 	}
 	if inner, err := os.ReadFile(filepath.Join(mnt, "sub", "inner.txt")); err != nil || string(inner) != "inside" {
 		t.Errorf("the file in the subdirectory read %q, %v", inner, err)
+	}
+	// The times the filesystem records are the ones `ls -l` shows.
+	if err == nil && !st.ModTime().Equal(wantMtime) {
+		t.Errorf("the kernel client shows mtime %v, the filesystem records %v", st.ModTime(), wantMtime)
+	}
+	if zst, err := os.Stat(filepath.Join(mnt, "sub", "zero.txt")); err != nil {
+		t.Errorf("stat of a file with no recorded times: %v", err)
+	} else {
+		// What the kernel shows for FILETIME 0 is its own business; it is
+		// logged, not asserted, and it must not be "now".
+		t.Logf("a file with no recorded times shows mtime %v through the kernel client", zst.ModTime())
+		if d := time.Since(zst.ModTime()); d > -time.Minute && d < time.Minute {
+			t.Errorf("unrecorded mtime shows as now: %v", zst.ModTime())
+		}
 	}
 
 	// …and the other direction, checked in the filesystem underneath rather
