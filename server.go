@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -45,6 +46,10 @@ type Server struct {
 	// one-request-at-a-time server of v0.7 and before. Set it before the first
 	// connection.
 	MaxInFlight int
+	// Logger receives the [TimesLog] lines. Nil means slog.Default(). (The
+	// server had no logger before; this is its first.) Set it before the first
+	// connection.
+	Logger *slog.Logger
 	// MaxInFlightTotal caps the requests in progress across every connection.
 	// Zero or less means [DefaultMaxInFlightTotal]. A request takes its share
 	// before its frame is read and gives it back when its reply is written, so
@@ -73,6 +78,9 @@ type share struct {
 	// capacity is what the size information classes report, or nil for the
 	// placeholder. See WithCapacity and WithCapacityFunc.
 	capacity func() (total, avail uint64)
+	// timePolicy is what happens to a time a client sets and the server cannot
+	// store. See [TimePolicy]; the zero value is the default, [TimesIgnore].
+	timePolicy TimePolicy
 
 	// locks are the byte ranges applications have reserved on this share.
 	// They belong to the share rather than to a connection because that is
