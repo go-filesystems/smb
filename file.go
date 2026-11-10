@@ -66,6 +66,10 @@ type openFile struct {
 
 	// session is the session that opened it, and resumeKey the key a
 	// server-side copy names it by once asked for (copychunk.go).
+	// pinAccess and pinWrite are the times this handle froze with -1 or a value
+	// (MS-FSCC 2.4.7), put back after writes and the close; -2 clears them.
+	pinAccess, pinWrite pinned
+
 	session      uint64
 	resumeKey    [24]byte
 	hasResumeKey bool
@@ -298,6 +302,9 @@ func (c *conn) closeFile(h header, body []byte) ([]byte, error) {
 	// directories all day -- which is what a file manager does -- would
 	// otherwise leave one behind each time.
 	delete(c.searches, of.id)
+	if !of.deleteOnClose {
+		c.restorePinned(of) // a time the client froze survives the close
+	}
 	if of.deleteOnClose && !of.ro {
 		if of.dir {
 			of.share.fsys.DeleteDir(of.path)
@@ -449,6 +456,7 @@ func (c *conn) write(h header, body []byte, msg []byte) ([]byte, error) {
 		}
 	}
 
+	c.restorePinned(of)
 	of.share.notify(of.path, actionModified)
 
 	b := append(responseTo(h, statusSuccess), make([]byte, 16)...)

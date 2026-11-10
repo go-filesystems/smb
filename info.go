@@ -352,14 +352,21 @@ func (c *conn) setInfo(h header, body []byte, msg []byte) ([]byte, error) {
 		if err := c.truncate(of, size); err != nil {
 			return errorResponse(h, statusFor(err, statusNotSupported)), nil
 		}
+		c.restorePinned(of)
 		of.share.notify(of.path, actionModified)
 
 	case fileBasicInformationSet:
-		// Timestamps and attributes, which go-filesystems does not record.
-		// Accepting them is deliberate: a client sets them at the end of every
-		// copy, and a refusal there is a copy that reports failure after the
-		// bytes arrived intact. What cannot be stored is dropped, not
-		// pretended into a field that would be read back.
+		// The times are applied (settimes.go) or refused: a time that is not
+		// applied is never reported as set. FileAttributes are still accepted
+		// and dropped, because the driver interface has nowhere to put them.
+		bi, st := decodeBasicInfo(in)
+		if st != statusSuccess {
+			return errorResponse(h, st), nil
+		}
+		if st := c.setBasicTimes(of, bi); st != statusSuccess {
+			return errorResponse(h, st), nil
+		}
+		of.share.notify(of.path, actionModified)
 
 	default:
 		return errorResponse(h, statusInvalidInfoClass), nil
