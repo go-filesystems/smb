@@ -36,11 +36,13 @@ import (
 // setter. So:
 //
 //   - LastAccessTime and LastWriteTime are applied through Chtimes.
-//   - CreationTime and ChangeTime are applied to nothing. A real value there is
-//     STATUS_NOT_SUPPORTED, and NOTHING is applied for that request (the checks
-//     all run before the first write), so a backup tool is never told a time was
-//     kept when it was not. The one exception is a value equal to the one the
-//     driver already reports through TimesReader: there is nothing to change.
+//   - CreationTime is applied to nothing, and ChangeTime only as Chtimes'
+//     refresh to now. A real CreationTime is STATUS_NOT_SUPPORTED, and NOTHING
+//     is applied for that request (the checks all run before the first write),
+//     so a backup tool is never told a time was kept when it was not; so is a
+//     real ChangeTime with no access or write time to refresh it. An exception
+//     for both: a value equal to the one the driver already reports through
+//     TimesReader, for there is nothing to change.
 //   - 0 is "keep"; -1 and -2 are implemented per handle (see openFile.pinned).
 
 // timeKind says what one FILETIME field of FILE_BASIC_INFORMATION asks for.
@@ -127,13 +129,25 @@ func (c *conn) setBasicTimes(of *openFile, bi basicInfo) uint32 {
 
 	// CreationTime and ChangeTime have no setter. A client that asks for one
 	// that is not already so hears it.
-	for _, f := range []struct {
+	//
+	// ChangeTime has one more way out. The Linux kernel client puts "now" in it
+	// on every utimensat (the VFS sets ATTR_CTIME), and Samba ignores the field
+	// for the same reason. A change time is the server's own clock: Chtimes
+	// "refreshes ctime to now", which is what the client is asking for within
+	// the round trip. So a ChangeTime that rides along with an access or write
+	// time that IS applied is accepted; on its own it is refused like a creation
+	// time, because then nothing would run to refresh it.
+	refreshed := bi.access.kind == timeSet || bi.write.kind == timeSet
+	for i, f := range []struct {
 		spec timeSpec
 		have func(*filesystem.FileTimes) filesystem.Timestamp
 	}{
 		{bi.creation, func(t *filesystem.FileTimes) filesystem.Timestamp { return t.Btime }},
 		{bi.change, func(t *filesystem.FileTimes) filesystem.Timestamp { return t.Ctime }},
 	} {
+		if i == 1 && refreshed && canSet {
+			continue
+		}
 		if f.spec.kind != timeSet {
 			// 0, -1 and -2 change nothing here. (-1 on ChangeTime asks that this
 			// handle's writes not refresh it; Chtimes refreshes ctime and a driver

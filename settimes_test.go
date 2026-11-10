@@ -132,7 +132,8 @@ func TestSetInfoBasicTimes(t *testing.T) {
 		{"below -2 change", basic(0, 0, ft(t0), 1<<63), statusInvalidParameter, t1, t1, 0},
 		{"short buffer", make([]byte, 39), statusInfoLengthMismatch, t1, t1, 0},
 		{"creation differs: nothing applied", basic(ft(t0), 0, ft(t2), 0), statusNotSupported, t1, t1, 0},
-		{"change differs: nothing applied", basic(0, 0, ft(t2), ft(t0)), statusNotSupported, t1, t1, 0},
+		{"change alone: nothing refreshes it", basic(0, 0, 0, ft(t0)), statusNotSupported, t1, t1, 0},
+		{"change rides along with an applied write time (the kernel's touch)", basic(0, 0, ft(t2), ft(t0)), statusSuccess, t1, t2, 1},
 		{"creation equal to the recorded one is nothing to do", basic(ft(t1), 0, ft(t2), ft(t1)), statusSuccess, t1, t2, 1},
 	}
 	for _, tc := range tests {
