@@ -1,9 +1,14 @@
 package smb
 
 import (
+	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -139,6 +144,7 @@ func TestSetInfoBasicTimes(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			c, of, f := newCht(t, true)
+			of.share.timePolicy = TimesRefuse // the table is about the strict answers
 			if got := setBasic(t, c, of, tc.in); got != tc.want {
 				t.Fatalf("status %#x, want %#x", got, tc.want)
 			}
@@ -153,8 +159,9 @@ func TestSetInfoBasicTimes(t *testing.T) {
 }
 
 func TestSetInfoTimesDriverShapes(t *testing.T) {
-	t.Run("no setter: a real time is NOT_SUPPORTED", func(t *testing.T) {
+	t.Run("no setter: a real time is NOT_SUPPORTED under TimesRefuse", func(t *testing.T) {
 		c, of := opened(t, &tinyFS{body: []byte("x")}, "/file.txt", false)
+		of.share.timePolicy = TimesRefuse
 		if got := setBasic(t, c, of, basic(0, 0, ft(t0), 0)); got != statusNotSupported {
 			t.Errorf("status %#x", got)
 		}
@@ -313,4 +320,131 @@ func FuzzDecodeBasicInfo(f *testing.F) {
 			}
 		}
 	})
+}
+
+// Each mode of TimePolicy against each case that is a stored field being
+// dropped, and against the one that is not (-1 without a reader).
+func TestTimePolicyModesAndCases(t *testing.T) {
+	type outcome struct {
+		status  uint32
+		applied bool     // the write time reached the driver
+		logged  []string // the fields in the log line, nil for no line
+	}
+	cases := []struct {
+		name   string
+		driver string // "full", "bare" (no setter), "noreader"
+		in     []byte
+		ignore outcome
+		refuse outcome
+		log    outcome
+	}{
+		{"creation differs, write set", "full", basic(ft(t0), 0, ft(t2), 0),
+			outcome{statusSuccess, true, nil}, outcome{statusNotSupported, false, nil}, outcome{statusSuccess, true, []string{"CreationTime"}}},
+		{"change alone", "full", basic(0, 0, 0, ft(t0)),
+			outcome{statusSuccess, false, nil}, outcome{statusNotSupported, false, nil}, outcome{statusSuccess, false, []string{"ChangeTime"}}},
+		{"creation and change alone", "full", basic(ft(t0), 0, 0, ft(t0)),
+			outcome{statusSuccess, false, nil}, outcome{statusNotSupported, false, nil}, outcome{statusSuccess, false, []string{"CreationTime", "ChangeTime"}}},
+		{"creation equals the recorded one", "full", basic(ft(t1), 0, ft(t2), ft(t1)),
+			outcome{statusSuccess, true, nil}, outcome{statusSuccess, true, nil}, outcome{statusSuccess, true, nil}},
+		{"no setter, write and access set", "bare", basic(0, ft(t2), ft(t2), 0),
+			outcome{statusSuccess, false, nil}, outcome{statusNotSupported, false, nil}, outcome{statusSuccess, false, []string{"LastAccessTime", "LastWriteTime"}}},
+		{"no setter, change rides along", "bare", basic(0, 0, ft(t2), ft(t0)),
+			outcome{statusSuccess, false, nil}, outcome{statusNotSupported, false, nil}, outcome{statusSuccess, false, []string{"ChangeTime", "LastWriteTime"}}},
+		{"-1 with a setter and no reader is a capability gap", "noreader", basic(0, 0, m1, 0),
+			outcome{statusNotSupported, false, nil}, outcome{statusNotSupported, false, nil}, outcome{statusNotSupported, false, nil}},
+		{"nothing to store", "full", basic(0, 0, 0, 0),
+			outcome{statusSuccess, false, nil}, outcome{statusSuccess, false, nil}, outcome{statusSuccess, false, nil}},
+	}
+	for _, tc := range cases {
+		for _, mode := range []struct {
+			name string
+			p    TimePolicy
+			want func() outcome
+		}{
+			{"ignore", TimesIgnore, func() outcome { return tc.ignore }},
+			{"refuse", TimesRefuse, func() outcome { return tc.refuse }},
+			{"log", TimesLog, func() outcome { return tc.log }},
+		} {
+			t.Run(tc.name+"/"+mode.name, func(t *testing.T) {
+				var c *conn
+				var of *openFile
+				var f *chtFS
+				switch tc.driver {
+				case "full":
+					c, of, f = newCht(t, true)
+				case "noreader":
+					c, of, f = newCht(t, false)
+				case "bare":
+					c, of = opened(t, &tinyFS{body: []byte("x")}, "/file.txt", false)
+				}
+				var buf bytes.Buffer
+				c.srv.Logger = slog.New(slog.NewJSONHandler(&buf, nil))
+				of.share.timePolicy = mode.p
+				want := mode.want()
+				if got := setBasic(t, c, of, tc.in); got != want.status {
+					t.Fatalf("status %#x, want %#x", got, want.status)
+				}
+				if f != nil && want.applied != f.m.Equal(t2) {
+					t.Errorf("write time applied = %v, want %v (mtime %v)", f.m.Equal(t2), want.applied, f.m)
+				}
+				var fields []string
+				if buf.Len() > 0 {
+					var rec struct {
+						Share, Path string
+						Fields      []string
+					}
+					if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+						t.Fatalf("the log line is not one JSON record: %v\n%s", err, buf.Bytes())
+					}
+					if rec.Share != `"disk"` || rec.Path != `"/file.txt"` {
+						t.Errorf("log names share %s path %s", rec.Share, rec.Path)
+					}
+					fields = rec.Fields
+				}
+				if !slices.Equal(fields, want.logged) {
+					t.Errorf("logged %v, want %v", fields, want.logged)
+				}
+			})
+		}
+	}
+}
+
+// The path in the log line is the client's. A newline, a quote or an escape in
+// it must stay inside the one value.
+func TestTimePolicyLogCannotBeForged(t *testing.T) {
+	c, of, _ := newCht(t, true)
+	var buf bytes.Buffer
+	c.srv.Logger = slog.New(slog.NewTextHandler(&buf, nil))
+	of.share.timePolicy = TimesLog
+	of.path = "/a\nlevel=ERROR msg=forged\x1b[31m\"é"
+	if got := setBasic(t, c, of, basic(ft(t0), 0, 0, 0)); got != statusSuccess {
+		t.Fatalf("status %#x", got)
+	}
+	out := buf.String()
+	if n := strings.Count(out, "\n"); n != 1 {
+		t.Errorf("%d lines in the log, want 1:\n%q", n, out)
+	}
+	if strings.Contains(out, "\x1b") || !strings.Contains(out, `\\n`) {
+		t.Errorf("the path was not escaped: %q", out)
+	}
+}
+
+func TestTimePolicyZeroValueIsIgnore(t *testing.T) {
+	var p TimePolicy
+	if p != TimesIgnore {
+		t.Fatal("the zero TimePolicy is not the documented default")
+	}
+	srv := New()
+	if err := srv.Share("d", &tinyFS{}, UnstorableTimes(TimesRefuse)); err != nil {
+		t.Fatal(err)
+	}
+	if srv.shareByName("d").timePolicy != TimesRefuse {
+		t.Error("UnstorableTimes did not set the policy")
+	}
+	if err := srv.Share("e", &tinyFS{}); err != nil {
+		t.Fatal(err)
+	}
+	if srv.shareByName("e").timePolicy != TimesIgnore {
+		t.Error("a share with no option is not TimesIgnore")
+	}
 }

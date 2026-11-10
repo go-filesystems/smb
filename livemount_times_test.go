@@ -83,4 +83,26 @@ func TestLiveTouchSetsTheTime(t *testing.T) {
 	if m := fsys.mt["/touched.txt"]; m.Unix() != want {
 		t.Errorf("the driver holds mtime %v, want unix %d", m, want)
 	}
+
+	// A copy that preserves times, under the default TimePolicy (TimesIgnore).
+	// Nothing on Linux can SET a creation time (utimensat has no birth-time
+	// field; statx only reads it), so the kernel never sends one: what this
+	// proves is the copy completing with its write time kept, with the ChangeTime
+	// the VFS adds. A creation-time-setting client (Windows) is covered by the
+	// unit tests of each policy mode.
+	src := filepath.Join(t.TempDir(), "src.txt")
+	if err := os.WriteFile(src, []byte("copied"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srcTime := time.Date(2005, 6, 7, 8, 9, 10, 0, time.UTC)
+	if err := os.Chtimes(src, srcTime, srcTime); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(mnt, "copied.txt")
+	if out, err := exec.Command("cp", "--preserve=timestamps", src, dst).CombinedOutput(); err != nil {
+		fatal(t, "cp --preserve=timestamps: %v\n%s", err, out)
+	}
+	if m := fsys.mt["/copied.txt"]; m.Unix() != srcTime.Unix() {
+		t.Errorf("the copy's mtime in the driver is %v, want %v", m, srcTime)
+	}
 }

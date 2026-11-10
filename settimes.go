@@ -4,6 +4,8 @@ package smb
 
 import (
 	"encoding/binary"
+	"log/slog"
+	"strconv"
 	"time"
 
 	filesystem "github.com/go-filesystems/interface"
@@ -137,13 +139,19 @@ func (c *conn) setBasicTimes(of *openFile, bi basicInfo) uint32 {
 	// the round trip. So a ChangeTime that rides along with an access or write
 	// time that IS applied is accepted; on its own it is refused like a creation
 	// time, because then nothing would run to refresh it.
+	//
+	// What cannot be stored is handled by the share's [TimePolicy]: dropped (the
+	// default), dropped and logged, or refused whole.
+	var dropped []string
+	logDropped := false
 	refreshed := bi.access.kind == timeSet || bi.write.kind == timeSet
 	for i, f := range []struct {
 		spec timeSpec
 		have func(*filesystem.FileTimes) filesystem.Timestamp
+		name string
 	}{
-		{bi.creation, func(t *filesystem.FileTimes) filesystem.Timestamp { return t.Btime }},
-		{bi.change, func(t *filesystem.FileTimes) filesystem.Timestamp { return t.Ctime }},
+		{bi.creation, func(t *filesystem.FileTimes) filesystem.Timestamp { return t.Btime }, "CreationTime"},
+		{bi.change, func(t *filesystem.FileTimes) filesystem.Timestamp { return t.Ctime }, "ChangeTime"},
 	} {
 		if i == 1 && refreshed && canSet {
 			continue
@@ -155,7 +163,7 @@ func (c *conn) setBasicTimes(of *openFile, bi basicInfo) uint32 {
 			continue
 		}
 		if cur == nil || filetimeOf(f.have(cur)) != f.spec.ft {
-			return statusNotSupported
+			dropped = append(dropped, f.name)
 		}
 	}
 
@@ -171,19 +179,30 @@ func (c *conn) setBasicTimes(of *openFile, bi basicInfo) uint32 {
 	fields := []want{{bi.access, &of.pinAccess, haveA}, {bi.write, &of.pinWrite, haveW}}
 
 	set := false
-	for _, f := range fields {
+	for i, f := range fields {
 		switch f.spec.kind {
 		case timeSet:
 			set = true
+			if !canSet {
+				dropped = append(dropped, [...]string{"LastAccessTime", "LastWriteTime"}[i])
+			}
 		case timeHold:
-			// Freezing a value needs the value, and a way to put it back.
+			// Freezing a value needs the value, and a way to put it back. This is
+			// a capability gap, not a stored field being dropped, so it is refused
+			// whatever the policy says.
 			if canSet && (cur == nil) {
 				return statusNotSupported
 			}
 		}
 	}
-	if set && !canSet {
-		return statusNotSupported
+	if len(dropped) > 0 {
+		if of.share.timePolicy == TimesRefuse {
+			return statusNotSupported
+		}
+		logDropped = of.share.timePolicy == TimesLog
+	}
+	if !canSet {
+		set = false // nothing to call; the real times were dropped above
 	}
 
 	// Chtimes treats a zero time.Time as "leave unchanged" (interface
@@ -224,7 +243,52 @@ func (c *conn) setBasicTimes(of *openFile, bi basicInfo) uint32 {
 			*f.pin = pinned{}
 		}
 	}
+	if logDropped {
+		c.logDropped(of, dropped)
+	}
 	return statusSuccess
+}
+
+// TimePolicy says what a share does with a time a client sets and the server
+// cannot store: a CreationTime (the filesystem interface has no setter for it),
+// a ChangeTime on its own (it is the server's own clock; see setBasicTimes), and
+// a LastAccessTime or LastWriteTime on a driver without
+// [filesystem.MetadataSetter]. The zero value is [TimesIgnore].
+//
+// It does not cover -1 on a driver that has Chtimes but no
+// [filesystem.TimesReader]: that is a capability gap (the value to freeze cannot
+// be read), not a stored field being dropped, and it is always
+// STATUS_NOT_SUPPORTED. Nor does it change how malformed values are answered.
+type TimePolicy uint8
+
+const (
+	// TimesIgnore answers success and drops the unstorable fields silently, as
+	// Samba's smb_set_file_time does, so a copy that preserves times (Windows
+	// Explorer, robocopy /COPY:T) keeps working. It is the default.
+	TimesIgnore TimePolicy = iota
+	// TimesRefuse answers STATUS_NOT_SUPPORTED (MS-SMB2 3.3.5.21.1) and applies
+	// nothing in that request, so a backup tool never believes an unstored time
+	// was kept.
+	TimesRefuse
+	// TimesLog is TimesIgnore plus one structured slog line per request, naming
+	// the share, the path and each dropped field. The path is client-supplied and
+	// is written quoted and ASCII-escaped, so it cannot forge a log line.
+	TimesLog
+)
+
+// UnstorableTimes sets the share's [TimePolicy].
+func UnstorableTimes(p TimePolicy) ShareOption { return func(s *share) { s.timePolicy = p } }
+
+// logDropped writes the TimesLog line to the server's Logger.
+func (c *conn) logDropped(of *openFile, fields []string) {
+	l := slog.Default()
+	if c.srv != nil && c.srv.Logger != nil {
+		l = c.srv.Logger
+	}
+	l.Warn("smb: SET_INFO times not stored",
+		"share", strconv.QuoteToASCII(of.share.name),
+		"path", strconv.QuoteToASCII(of.path),
+		"fields", fields)
 }
 
 // restorePinned puts back the times this handle froze, after something that the

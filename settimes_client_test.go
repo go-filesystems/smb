@@ -6,6 +6,7 @@ import (
 	"time"
 
 	filesystem "github.com/go-filesystems/interface"
+	fssmb "github.com/go-filesystems/smb"
 )
 
 // settableFS is the memory filesystem that records the access and write times
@@ -81,15 +82,31 @@ func TestChtimesThroughGoSMB2(t *testing.T) {
 	}
 }
 
-// A driver that cannot set times answers an error, not success: a backup tool
-// must not believe the times were kept.
+// With TimesRefuse, a driver that cannot set times answers an error, not
+// success: a backup tool must not believe the times were kept. Under the
+// default (TimesIgnore) the same call succeeds and drops them.
 func TestChtimesWithoutTheSetterIsAnError(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		opts    []fssmb.ShareOption
+		wantErr bool
+	}{
+		{"refuse", []fssmb.ShareOption{fssmb.UnstorableTimes(fssmb.TimesRefuse)}, true},
+		{"default", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chtimesNoSetter(t, tc.opts, tc.wantErr)
+		})
+	}
+}
+
+func chtimesNoSetter(t *testing.T, opts []fssmb.ShareOption, wantErr bool) {
 	mem := newMemFS(true)
 	if err := mem.WriteFile("/f.txt", []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	addr, srv := serve(t)
-	if err := srv.Share("disk", mem); err != nil {
+	if err := srv.Share("disk", mem, opts...); err != nil {
 		t.Fatal(err)
 	}
 	s, done := dial(t, addr, "alice", "hunter2")
@@ -99,7 +116,7 @@ func TestChtimesWithoutTheSetterIsAnError(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer share.Umount()
-	if err := share.Chtimes("f.txt", time.Now(), time.Now()); err == nil {
-		t.Fatal("Chtimes succeeded on a driver with no way to set a time")
+	if err := share.Chtimes("f.txt", time.Now(), time.Now()); (err != nil) != wantErr {
+		t.Fatalf("Chtimes on a driver with no way to set a time: err = %v, want error %v", err, wantErr)
 	}
 }
