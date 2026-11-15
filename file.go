@@ -39,6 +39,11 @@ const (
 	actionOverwritten uint32 = 3
 )
 
+// volumeSyncer is a Filesystem that can be asked to put everything it has
+// accepted on its backing store: (*hfsplus.Volume).Sync is one. A FLUSH on a
+// handle with no WritableFile of its own is passed to it.
+type volumeSyncer interface{ Sync() error }
+
 // An openFile is one handle a client holds.
 type openFile struct {
 	id            [16]byte
@@ -471,10 +476,24 @@ func (c *conn) write(h header, body []byte, msg []byte) ([]byte, error) {
 // flush as data loss.
 func (c *conn) flush(h header, body []byte) ([]byte, error) {
 	if len(body) >= 24 {
-		if of := c.fileByID(body[8:]); of != nil && of.w != nil {
-			defer of.share.changing()()
-			if err := of.w.Sync(); err != nil {
-				return errorResponse(h, statusFor(err, statusAccessDenied)), nil
+		if of := c.fileByID(body[8:]); of != nil {
+			switch {
+			case of.w != nil:
+				defer of.share.changing()()
+				if err := of.w.Sync(); err != nil {
+					return errorResponse(h, statusFor(err, statusAccessDenied)), nil
+				}
+			case of.pipe == nil && !of.dir && !of.ro && of.share.fsys != nil:
+				// A driver with no positional handle (hfsplus) writes whole
+				// files, but may still hold what it accepted until the volume
+				// is synced (hfsplus_durability lazy or mounted): the flush is
+				// the client's request that it be on the medium.
+				if vs, ok := of.share.fsys.(volumeSyncer); ok {
+					defer of.share.changing()()
+					if err := vs.Sync(); err != nil {
+						return errorResponse(h, statusFor(err, statusIOError)), nil
+					}
+				}
 			}
 		}
 	}

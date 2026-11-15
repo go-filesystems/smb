@@ -35,6 +35,7 @@ const (
 	statusNetworkNameDeleted   uint32 = 0xC00000C9
 	statusInvalidDeviceRequest uint32 = 0xC0000010
 	statusDiskFull             uint32 = 0xC000007F
+	statusIOError              uint32 = 0xC00000E9 // STATUS_UNEXPECTED_IO_ERROR
 	statusMediaWriteProtected  uint32 = 0xC00000A2
 	statusFileClosed           uint32 = 0xC0000128
 	statusInvalidHandle        uint32 = 0xC0000008
