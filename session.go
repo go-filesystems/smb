@@ -175,6 +175,7 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 		c.mu.Lock() // the goroutines that answer later read this table
 		c.sessions[h.sessionID] = sess
 		c.mu.Unlock()
+		c.markAuthenticated()
 		c.logSession(h.sessionID, auth.user, sess)
 		var done []byte
 		if c.spnego {

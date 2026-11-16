@@ -85,6 +85,27 @@ type Server struct {
 	// whose shares then refuse every connection. Set it before the first
 	// connection.
 	DisableEncryption bool
+	// MaxConnections is how many connections the server holds at once; zero means
+	// [DefaultMaxConnections] and a negative value no limit. A connection over the
+	// limit is closed as it is accepted. Set it before the first connection.
+	MaxConnections int
+	// MaxPreAuthConnections is how many connections may have no authenticated
+	// session; zero means [DefaultMaxPreAuthConnections], a negative value no
+	// limit. A flood of connections that never log in fills this and nothing more,
+	// and a client that does log in frees its place. Set it before the first
+	// connection.
+	MaxPreAuthConnections int
+	// PreAuthTimeout is how long a connection may go without authenticating before
+	// it is closed; zero means [DefaultPreAuthTimeout], a negative value never.
+	// Set it before the first connection.
+	PreAuthTimeout time.Duration
+
+	// preAuth counts the connections with no authenticated session; dropped is how
+	// many the limits have refused, and dropping is whether the log has already
+	// said so for the current burst. Guarded by mu.
+	preAuth  int
+	dropped  int
+	dropping bool
 }
 
 type share struct {
@@ -345,14 +366,15 @@ func (s *Server) Serve(ln net.Listener) error {
 			return err
 		}
 		c := newConn(s, nc)
-		s.mu.Lock()
-		s.conns[c] = struct{}{}
-		s.mu.Unlock()
+		c.counted.Store(true)
+		if !s.admit(c) {
+			// Over a limit: closed here, before a goroutine or a buffer is spent.
+			nc.Close()
+			continue
+		}
 		go func() {
+			defer s.release(c)
 			c.serve()
-			s.mu.Lock()
-			delete(s.conns, c)
-			s.mu.Unlock()
 		}()
 	}
 }
@@ -399,6 +421,7 @@ type conn struct {
 	clientCapabilities uint32
 	// clientDialects and clientGuid are what the client's NEGOTIATE said, kept for
 	// FSCTL_VALIDATE_NEGOTIATE_INFO to compare against.
+	connLimitState // see limits.go
 	clientDialects []uint16
 	clientGuid     [16]byte
 	// seq is the command sequence window. It is nil until serve starts it, so a
@@ -475,6 +498,12 @@ type session struct {
 func (c *conn) serve() {
 	defer c.nc.Close()
 	c.seq = newSeqWindow()
+	c.startPreAuthClock()
+	defer func() {
+		if t := c.preTimer.Load(); t != nil {
+			t.Stop()
+		}
+	}()
 	// Registered first, so it runs last: nothing is in flight that could still
 	// use the keys. (Sessions still open when the connection drops were never
 	// logged off.)
