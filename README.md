@@ -32,7 +32,8 @@ sight.
 Verified with the macOS kernel client on macOS 26 — `mount_smbfs`, then `ls`,
 `cat`, a write, and a 512 KiB copy whose sha256 matches — over a FAT32 image
 served by [`go-filesystems/fat32`](https://github.com/go-filesystems/fat32).
-`smbutil statshares` reports `SMB_3.0.2` and `SIGNING_SUPPORTED TRUE`.
+`smbutil statshares` reported `SMB_3.0.2` and `SIGNING_SUPPORTED TRUE` (before
+3.1.1 was added; the same client now settles on 3.1.1, see below).
 
 And with the Linux kernel client in CI, which mounts it with **no dialect
 named**:
@@ -84,9 +85,10 @@ and the **two traps** that make this hard to do at all.
 | opening, reading, writing | positional through `Opener`/`WritableFile`, whole-file where a driver has neither |
 | timestamps | a driver with `filesystem.TimesReader` reports its own creation, access, write and change times, in FileBasicInformation, FileNetworkOpenInformation, the directory classes and CREATE; a time the format does not keep (FAT has no change time) is `0`, "not specified" in MS-FSCC, never NOW. A driver without the capability still answers NOW for all four. Setting times (`touch -d`, `cp -p`, robocopy `/COPY:T`): `SET_INFO` FileBasicInformation maps LastAccessTime and LastWriteTime to `MetadataSetter.Chtimes` (the other one is read back through `TimesReader` so it is not clobbered); 0 keeps; -1 freezes the time on that handle (writes, resizes and the close put it back) and -2 resumes (MS-FSCC 2.4.7); below -2 is `STATUS_INVALID_PARAMETER`. A time that cannot be stored (a CreationTime, which the interface has no setter for; a ChangeTime on its own, since it is the server's clock and `Chtimes` refreshes it to now; an access or write time on a driver without `Chtimes`) follows the share's `smb.UnstorableTimes(policy)` option: `smb.TimesIgnore` (the zero value and default) answers success and drops it, as Samba does, so Explorer and `robocopy /COPY:T` copies keep working; `smb.TimesRefuse` answers `STATUS_NOT_SUPPORTED` and applies nothing in the request; `smb.TimesLog` ignores and writes one structured `slog` line (share, path, fields; path quoted and escaped) to `Server.Logger` (default `slog.Default()`). A value equal to what the driver reports is nothing to store. `-1` on a driver with `Chtimes` but no `TimesReader` is always `STATUS_NOT_SUPPORTED`: that is a capability gap. FileAttributes are still accepted and dropped |
 | listing, renaming, truncating, deleting | including the chained requests macOS sends on every open, and the ones Windows sends whose FIRST operation is meant to fail |
-| signing | **HMAC-SHA256** for 2.x, **AES-CMAC** for 3.x, both implemented here |
-| dialects | 2.1, 3.0 and 3.0.2 — Linux mounts with no `vers=` at all, macOS settles on 3.0.2 |
-| encryption and 3.1.1 | **not yet** — 3.1.1 changes the shape of the exchange, and naming it without pre-authentication integrity would promise what is not there |
+| signing | **HMAC-SHA256** for 2.x, **AES-CMAC** for 3.x, and **AES-GMAC** on 3.1.1 when the client offers it (`SMB2_SIGNING_CAPABILITIES`), all implemented here |
+| dialects | 2.1, 3.0, 3.0.2 and **3.1.1** — Linux mounts with no `vers=` at all, and macOS `mount_smbfs` settles on 3.1.1 |
+| 3.1.1 | negotiate contexts (`PREAUTH_INTEGRITY_CAPABILITIES` with SHA-512, `SIGNING_CAPABILITIES`), the pre-authentication integrity hash over NEGOTIATE and SESSION_SETUP, and the signing key derived from it (`SMBSigningKey`), as MS-SMB2 3.3.5.4 and 3.3.5.5.3 describe. A 3.1.1 connection that sends `FSCTL_VALIDATE_NEGOTIATE_INFO` is terminated (3.3.5.15.12) |
+| encryption | **not yet** — no `ENCRYPTION_CAPABILITIES` context is answered, so a client sees a server that does not offer it |
 | byte-range locks | taken, released and **enforced** on reads and writes, including *waiting* for one |
 | change notification | on changes that go **through this server** — one made in the image by something else is invisible, because nothing underneath tells us |
 | asynchronous replies | `STATUS_PENDING` with an AsyncId, and `CANCEL` |
@@ -117,7 +119,16 @@ client's back. macOS and Linux never send a chain whose first operation fails,
 and the Go client never chains at all.
 
 What is still unchecked: this ran through a QEMU guest-forward rather than on
-port 445 itself, and encryption and 3.1.1 are absent whatever the client is.
+port 445 itself; the Windows run above predates 3.1.1 (it negotiated 3.0.2) and
+has not been repeated; and encryption is absent whatever the client is.
+
+**3.1.1, read from the server's side.** A session logs what it negotiated at
+`Debug` level on `Server.Logger`: `dialect=3.1.1 signing=AES-128-GMAC`.
+macOS 26's `mount_smbfs` negotiates exactly that (`go test -tags macmount -run
+TestMacMount -v`); the Linux kernel client in CI mounts with no `vers=` and the
+lane asserts the session says `dialect=3.1.1`; go-smb2, a foreign client that
+checks the signature of the last SESSION_SETUP response, negotiates 3.1.1 and
+AES-CMAC (it does not offer AES-GMAC) in the unit tests.
 
 **Sizes a client names are bounded before they are allocated.** Where a
 driver has neither positional writes nor `Truncate`, a WRITE or an

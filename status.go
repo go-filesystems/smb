@@ -45,4 +45,7 @@ const (
 	statusCancelled            uint32 = 0xC0000120
 	statusNotifyCleanup        uint32 = 0x0000010C
 	statusNotifyEnumDir        uint32 = 0x0000010D
+	// STATUS_SMB_NO_PREAUTH_INTEGRITY_HASH_OVERLAP: [MS-SMB2] 3.3.5.4, a 3.1.1
+	// client whose hash list names nothing this server speaks.
+	statusNoPreauthHashOverlap uint32 = 0xC05D0000
 )

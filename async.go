@@ -72,7 +72,7 @@ func (c *conn) finishAsync(op *pendingOp, reply []byte) {
 		return
 	}
 	if sess != nil {
-		signMessage(c.dialect, sess.signingKey, reply)
+		signMessage(c.signAlgo(), sess.signingKey, reply)
 	}
 	c.send(reply)
 }
@@ -127,7 +127,7 @@ func (c *conn) cancel(h header) ([]byte, error) {
 		statusCancelled, found.asyncID, 9)
 	binary.LittleEndian.PutUint16(reply[headerLen:], 9)
 	if sess != nil {
-		signMessage(c.dialect, sess.signingKey, reply)
+		signMessage(c.signAlgo(), sess.signingKey, reply)
 	}
 	return nil, c.send(reply)
 }

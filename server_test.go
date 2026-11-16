@@ -166,9 +166,8 @@ func TestTheLegacyGreetingIsAnswered(t *testing.T) {
 // what came after.
 func TestADialectWeDoNotSpeak(t *testing.T) {
 	c := &conn{srv: New()}
-	// 2.0.2 is for Vista and 3.1.1 changes the shape of the exchange: neither
-	// is spoken here.
-	out, err := c.dispatch(negotiateRequest(dialect202, dialect311))
+	// 2.0.2 is for Vista and is not spoken here.
+	out, err := c.dispatch(negotiateRequest(dialect202))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,14 +177,15 @@ func TestADialectWeDoNotSpeak(t *testing.T) {
 	}
 	// …and one we do speak is.
 	// …and the best of what both sides speak is chosen: 3.0.2 over 3.0 over
-	// 2.1, whatever order the client listed them in.
+	// 2.1, whatever order the client listed them in. (3.1.1 is chosen only with
+	// negotiate contexts: see negctx_test.go.)
 	for _, tc := range []struct {
 		offered []uint16
 		want    uint16
 	}{
-		{[]uint16{dialect202, dialect210, dialect311}, dialect210},
+		{[]uint16{dialect202, dialect210}, dialect210},
 		{[]uint16{dialect210, dialect300}, dialect300},
-		{[]uint16{dialect202, dialect210, dialect300, dialect302, dialect311}, dialect302},
+		{[]uint16{dialect202, dialect210, dialect300, dialect302}, dialect302},
 	} {
 		c := &conn{srv: New()}
 		out, err := c.dispatch(negotiateRequest(tc.offered...))

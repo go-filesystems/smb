@@ -3,7 +3,9 @@
 package smb
 
 import (
+	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -18,14 +20,19 @@ const (
 
 // dialectsWeSpeak, in the order a server should prefer.
 //
-// 3.0.2 and 3.0 sign with AES-CMAC and derive their key rather than using the
-// session key directly; 2.1 signs with HMAC-SHA256. All three are honoured
-// here. 3.1.1 is not: it adds pre-authentication integrity and negotiate
-// contexts, which change the shape of the exchange itself, and naming it
-// without implementing them would be promising what is not there.
+// 3.1.1 adds pre-authentication integrity and negotiate contexts (negctx.go,
+// preauth.go); 3.0.2 and 3.0 sign with AES-CMAC and derive their key rather than
+// using the session key directly; 2.1 signs with HMAC-SHA256. All four are
+// honoured here. Encryption is not: no ENCRYPTION context is answered, so a
+// client sees a server that does not offer it.
 //
 // 2.0.2 exists only for Vista and is left out.
-var dialectsWeSpeak = []uint16{dialect302, dialect300, dialect210}
+var dialectsWeSpeak = []uint16{dialect311, dialect302, dialect300, dialect210}
+
+// errRenegotiate ends a connection whose client sends a second NEGOTIATE:
+// [MS-SMB2] 3.3.5.4, "the server MUST disconnect the connection ... and not
+// reply", once a dialect has been chosen.
+var errRenegotiate = errors.New("smb: a second NEGOTIATE on one connection")
 
 // legacyNegotiateResponse answers the one SMB1 message this server reads.
 //
@@ -35,15 +42,28 @@ var dialectsWeSpeak = []uint16{dialect302, dialect300, dialect210}
 // which means "send me a real SMB2 negotiate". The contents of the SMB1
 // message are never parsed: there is exactly one thing to say back.
 func (c *conn) legacyNegotiateResponse() ([]byte, error) {
-	return c.negotiateResponse(header{command: cmdNegotiate}, dialectWildcard), nil
+	return c.negotiateResponse(header{command: cmdNegotiate}, dialectWildcard, nil), nil
 }
 
 // negotiate answers an SMB2 NEGOTIATE by choosing a dialect both sides speak.
-func (c *conn) negotiate(h header, body []byte) ([]byte, error) {
+//
+// msg is the whole request, because 3.1.1 hashes it (see preauth.go) and its
+// negotiate contexts are addressed from the start of the header.
+func (c *conn) negotiate(h header, body, msg []byte) ([]byte, error) {
 	if len(body) < 36 {
 		return nil, fmt.Errorf("smb: NEGOTIATE body of %d bytes is too short", len(body))
 	}
+	if c.dialect != 0 {
+		return nil, errRenegotiate
+	}
+	// [MS-SMB2] 3.3.5.2.4: a NEGOTIATE has no session to sign it.
+	if h.flags&flagSigned != 0 {
+		return errorResponse(h, statusInvalidParameter), nil
+	}
 	count := int(binary.LittleEndian.Uint16(body[2:]))
+	if count == 0 {
+		return errorResponse(h, statusInvalidParameter), nil
+	}
 	offered := make([]uint16, 0, count)
 	for i, off := 0, 36; i < count && off+2 <= len(body); i, off = i+1, off+2 {
 		offered = append(offered, binary.LittleEndian.Uint16(body[off:]))
@@ -65,14 +85,53 @@ func (c *conn) negotiate(h header, body []byte) ([]byte, error) {
 		// "0x0210" when it never offered it has no way to interpret the rest.
 		return errorResponse(h, statusNotSupported), nil
 	}
+
+	var (
+		ctxs     []outContext
+		hashID   uint16
+		signAlgo = signIDAESCMAC
+	)
+	if chosen == dialect311 {
+		// The contexts start after the dialect array, so an offset inside the
+		// fixed part or the array itself is a lie about where they are.
+		ctxOff := int(binary.LittleEndian.Uint32(body[28:]))
+		ctxCount := int(binary.LittleEndian.Uint16(body[32:]))
+		if ctxOff < headerLen+36+2*count {
+			return errorResponse(h, statusInvalidParameter), nil
+		}
+		cc, status := parseNegotiateContexts(msg, ctxOff, ctxCount)
+		if status != statusSuccess {
+			return errorResponse(h, status), nil
+		}
+		var ok bool
+		if hashID, ok = chooseHash(cc.hashes); !ok {
+			return errorResponse(h, statusNoPreauthHashOverlap), nil
+		}
+		salt := make([]byte, 32)
+		rand.Read(salt)
+		ctxs = append(ctxs, preauthContext(hashID, salt))
+		if cc.hasSigning {
+			signAlgo = chooseSigning(cc.signing)
+			ctxs = append(ctxs, signingContext(signAlgo))
+		}
+	}
+
 	c.dialect = chosen
 	c.clientSecurityMode = binary.LittleEndian.Uint16(body[4:])
 	c.clientCapabilities = binary.LittleEndian.Uint32(body[8:])
-	return c.negotiateResponse(h, chosen), nil
+	c.signingAlgorithm = signAlgo
+	resp := c.negotiateResponse(h, chosen, ctxs)
+	if chosen == dialect311 {
+		// The chain starts at zero and takes the request and the response as
+		// they were on the wire; nothing may touch `resp` after this.
+		c.preauth = preauthExtend(preauthExtend(preauthStart(), msg), resp)
+	}
+	return resp, nil
 }
 
-// negotiateResponse builds the header and body of a NEGOTIATE response.
-func (c *conn) negotiateResponse(h header, dialect uint16) []byte {
+// negotiateResponse builds the header and body of a NEGOTIATE response. ctxs
+// is the NegotiateContextList of a 3.1.1 answer, and nil for any other dialect.
+func (c *conn) negotiateResponse(h header, dialect uint16, ctxs []outContext) []byte {
 	// The security buffer says which authentication mechanisms exist. Offering
 	// exactly one, NTLM, is what makes the client's next message predictable.
 	sec := negTokenInitNTLM()
@@ -96,5 +155,15 @@ func (c *conn) negotiateResponse(h header, dialect uint16) []byte {
 	binary.LittleEndian.PutUint16(body[56:], headerLen+bodyLen)
 	binary.LittleEndian.PutUint16(body[58:], uint16(len(sec)))
 	copy(body[bodyLen:], sec)
+	if len(ctxs) > 0 {
+		// NegotiateContextCount at body[6], NegotiateContextOffset at body[60]:
+		// the list starts on the next 8-byte boundary after the security buffer.
+		for len(b)%8 != 0 {
+			b = append(b, 0)
+		}
+		binary.LittleEndian.PutUint16(b[headerLen+6:], uint16(len(ctxs)))
+		binary.LittleEndian.PutUint32(b[headerLen+60:], uint32(len(b)))
+		b = appendContexts(b, ctxs)
+	}
 	return b
 }

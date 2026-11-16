@@ -12,12 +12,12 @@ import (
 func TestSigningKeyDependsOnTheDialect(t *testing.T) {
 	sessionKey := []byte("0123456789abcdef")
 	for _, d := range []uint16{dialect202, dialect210} {
-		if got := signingKeyFor(d, sessionKey); !bytes.Equal(got, sessionKey) {
+		if got := signingKeyFor(d, sessionKey, nil); !bytes.Equal(got, sessionKey) {
 			t.Errorf("dialect %#04x derives a key where it should use the session key", d)
 		}
 	}
 	for _, d := range []uint16{dialect300, dialect302} {
-		got := signingKeyFor(d, sessionKey)
+		got := signingKeyFor(d, sessionKey, nil)
 		if bytes.Equal(got, sessionKey) {
 			t.Errorf("dialect %#04x signs with the session key itself", d)
 		}
@@ -28,8 +28,8 @@ func TestSigningKeyDependsOnTheDialect(t *testing.T) {
 	// The derivation is a function of its inputs, and a different label gives
 	// a different key -- which is what stops a signing key doubling as an
 	// encryption key.
-	if bytes.Equal(kdf(sessionKey, "SMB2AESCMAC\x00", "SmbSign\x00"),
-		kdf(sessionKey, "SMB2AESCCM\x00", "ServerIn \x00")) {
+	if bytes.Equal(kdf(sessionKey, "SMB2AESCMAC\x00", "SmbSign\x00", 128),
+		kdf(sessionKey, "SMB2AESCCM\x00", "ServerIn \x00", 128)) {
 		t.Error("two labels derived the same key")
 	}
 }
@@ -38,7 +38,7 @@ func TestSigningKeyDependsOnTheDialect(t *testing.T) {
 // and verifying are the same computation from the two sides.
 func TestSignAndVerifyRoundTrip(t *testing.T) {
 	key := []byte("0123456789abcdef")
-	for _, d := range []uint16{dialect210, dialect300} {
+	for _, d := range []sigAlgo{sigHMAC, sigCMAC, sigGMAC} {
 		msg := append(responseTo(header{command: cmdEcho, messageID: 3}, statusSuccess), 1, 2, 3, 4)
 		signMessage(d, key, msg)
 		if binary.LittleEndian.Uint32(msg[offFlags:])&flagSigned == 0 {
@@ -67,11 +67,11 @@ func TestSignAndVerifyRoundTrip(t *testing.T) {
 	}
 	// Nothing to sign with, or nothing to sign: no signature and no panic.
 	msg := responseTo(header{command: cmdEcho}, statusSuccess)
-	signMessage(dialect210, nil, msg)
+	signMessage(sigHMAC, nil, msg)
 	if binary.LittleEndian.Uint32(msg[offFlags:])&flagSigned != 0 {
 		t.Error("a message was marked signed with no key")
 	}
-	if verifyMessage(dialect210, nil, msg) || verifyMessage(dialect210, key, msg[:10]) {
+	if verifyMessage(sigHMAC, nil, msg) || verifyMessage(sigHMAC, key, msg[:10]) {
 		t.Error("something without a key or a header verified")
 	}
 }

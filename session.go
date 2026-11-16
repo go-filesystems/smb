@@ -5,6 +5,7 @@ package smb
 import (
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 )
 
 // sessionSetup runs the two halves of NTLM.
@@ -14,7 +15,11 @@ import (
 // session id is allocated on the FIRST half, because the client puts it in the
 // header of the second -- a server that waits until the user is known has
 // nothing to match the answer against.
-func (c *conn) sessionSetup(h header, body []byte) ([]byte, error) {
+//
+// On 3.1.1 the exchange is also folded into the pre-authentication integrity
+// hash ([MS-SMB2] 3.3.5.5.3): both requests and the first response, but not the
+// last response, which is signed with the key the hash produces.
+func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 	if len(body) < 24 {
 		return nil, fmt.Errorf("smb: SESSION_SETUP body of %d bytes is too short", len(body))
 	}
@@ -35,12 +40,15 @@ func (c *conn) sessionSetup(h header, body []byte) ([]byte, error) {
 
 	switch binary.LittleEndian.Uint32(token[8:]) {
 	case ntlmNegotiate:
-		ch, msg, err := newChallenge(c.srv.serverName())
+		ch, challenge, err := newChallenge(c.srv.serverName())
 		if err != nil {
 			return nil, err
 		}
 		c.pending = ch
 		c.spnego = wrapped
+		if c.dialect == dialect311 {
+			c.pendingPreauth = preauthExtend(c.preauth, msg)
+		}
 		id := h.sessionID
 		if id == 0 {
 			c.nextID++
@@ -49,11 +57,15 @@ func (c *conn) sessionSetup(h header, body []byte) ([]byte, error) {
 		h.sessionID = id
 		// In kind: wrapped for a client that wrapped, bare for one that did
 		// not. Linux's kernel client is the second kind.
-		reply := msg
+		reply := challenge
 		if wrapped {
-			reply = negTokenRespChallenge(msg)
+			reply = negTokenRespChallenge(challenge)
 		}
-		return c.sessionSetupResponse(h, statusMoreProcessing, reply), nil
+		resp := c.sessionSetupResponse(h, statusMoreProcessing, reply)
+		if c.dialect == dialect311 {
+			c.pendingPreauth = preauthExtend(c.pendingPreauth, resp)
+		}
+		return resp, nil
 
 	case ntlmAuth:
 		if c.pending == nil {
@@ -75,11 +87,19 @@ func (c *conn) sessionSetup(h header, body []byte) ([]byte, error) {
 			return errorResponse(h, statusLogonFailure), nil
 		}
 		c.pending = nil
+		var preauth []byte
+		if c.dialect == dialect311 {
+			// The last request is in the hash that derives the keys; the last
+			// response, which they sign, is not.
+			preauth = preauthExtend(c.pendingPreauth, msg)
+			c.pendingPreauth = nil
+		}
 		c.sessions[h.sessionID] = &session{
 			user:       auth.user,
 			sessionKey: key,
-			signingKey: signingKeyFor(c.dialect, key),
+			signingKey: signingKeyFor(c.dialect, key, preauth),
 		}
+		c.logSession(h.sessionID, auth.user)
 		var done []byte
 		if c.spnego {
 			done = negTokenRespAccept()
@@ -88,12 +108,51 @@ func (c *conn) sessionSetup(h header, body []byte) ([]byte, error) {
 		// request was not: it is the first thing a client can check, and it
 		// is what proves the server holds the same key.
 		reply := c.sessionSetupResponse(h, statusSuccess, done)
-		signMessage(c.dialect, c.sessions[h.sessionID].signingKey, reply)
+		signMessage(c.signAlgo(), c.sessions[h.sessionID].signingKey, reply)
 		return reply, nil
 
 	default:
 		return errorResponse(h, statusLogonFailure), nil
 	}
+}
+
+// logSession says, on the server's Logger at Debug level, what an
+// authenticated session negotiated: the dialect and the signing algorithm. It is
+// how a deployment reads what a given client actually got.
+func (c *conn) logSession(id uint64, user string) {
+	l := slog.Default()
+	if c.srv != nil && c.srv.Logger != nil {
+		l = c.srv.Logger
+	}
+	l.Debug("smb session established", "session", id, "user", user,
+		"dialect", dialectName(c.dialect), "signing", c.signAlgo().String())
+}
+
+// dialectName is "3.1.1" for 0x0311.
+func dialectName(d uint16) string {
+	switch d {
+	case dialect202:
+		return "2.0.2"
+	case dialect210:
+		return "2.1"
+	case dialect300:
+		return "3.0"
+	case dialect302:
+		return "3.0.2"
+	case dialect311:
+		return "3.1.1"
+	}
+	return fmt.Sprintf("%#04x", d)
+}
+
+func (a sigAlgo) String() string {
+	switch a {
+	case sigGMAC:
+		return "AES-128-GMAC"
+	case sigCMAC:
+		return "AES-128-CMAC"
+	}
+	return "HMAC-SHA256"
 }
 
 // sessionSetupResponse builds the 8-byte body plus its security buffer.

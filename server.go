@@ -363,12 +363,20 @@ type conn struct {
 	dialect            uint16
 	clientSecurityMode uint16
 	clientCapabilities uint32
-	nextID             uint64
-	sessions           map[uint64]*session
-	trees              map[uint32]*treeConn
-	nextTree           uint32
-	pending            *challenge // the NTLM challenge sent, awaiting its answer
-	spnego             bool       // whether this client wraps its tokens, or sends them bare
+	// signingAlgorithm is the id negotiated by SMB2_SIGNING_CAPABILITIES
+	// (AES-CMAC when none was); see sigAlgoFor.
+	signingAlgorithm uint16
+	// preauth is the pre-authentication integrity hash after NEGOTIATE (3.1.1
+	// only); pendingPreauth continues it through the SESSION_SETUP exchange in
+	// progress. See preauth.go.
+	preauth        []byte
+	pendingPreauth []byte
+	nextID         uint64
+	sessions       map[uint64]*session
+	trees          map[uint32]*treeConn
+	nextTree       uint32
+	pending        *challenge // the NTLM challenge sent, awaiting its answer
+	spnego         bool       // whether this client wraps its tokens, or sends them bare
 
 	panicked any // what a connection died of, for a test to insist on
 	files    map[[16]byte]*openFile
@@ -553,7 +561,7 @@ func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 			reply := errorResponse(h, prevStatus)
 			if h.flags&flagSigned != 0 {
 				if sess := c.sessions[binary.LittleEndian.Uint64(one[offSessionID:])]; sess != nil {
-					signMessage(c.dialect, sess.signingKey, reply)
+					signMessage(c.signAlgo(), sess.signingKey, reply)
 				}
 			}
 			if prevAt >= 0 {
@@ -578,7 +586,7 @@ func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 		// authenticated, whatever it says in its header.
 		sess := c.sessions[binary.LittleEndian.Uint64(one[offSessionID:])]
 		if h.flags&flagSigned != 0 {
-			if sess == nil || !verifyMessage(c.dialect, sess.signingKey, one) {
+			if sess == nil || !verifyMessage(c.signAlgo(), sess.signingKey, one) {
 				return c.finish(out, prevAt, errorResponse(h, statusAccessDenied), sess, h), nil
 			}
 		}
@@ -590,7 +598,7 @@ func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 		// Signed in kind: a client that signed its request checks the reply,
 		// and one that did not would reject a signature it cannot verify.
 		if reply != nil && h.flags&flagSigned != 0 && sess != nil {
-			signMessage(c.dialect, sess.signingKey, reply)
+			signMessage(c.signAlgo(), sess.signingKey, reply)
 		}
 		if reply != nil {
 			if len(reply) >= headerLen {
@@ -619,7 +627,7 @@ func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 // client is reading.
 func (c *conn) finish(out []byte, prevAt int, reply []byte, sess *session, h header) []byte {
 	if sess != nil && h.flags&flagSigned != 0 {
-		signMessage(c.dialect, sess.signingKey, reply)
+		signMessage(c.signAlgo(), sess.signingKey, reply)
 	}
 	if prevAt >= 0 {
 		binary.LittleEndian.PutUint32(out[prevAt+offNextCommand:], uint32(len(out)-prevAt))
@@ -657,9 +665,9 @@ func (c *conn) dispatch(msg []byte) ([]byte, error) {
 	}
 	switch h.command {
 	case cmdNegotiate:
-		return c.negotiate(h, body)
+		return c.negotiate(h, body, msg)
 	case cmdSessionSetup:
-		return c.sessionSetup(h, body)
+		return c.sessionSetup(h, body, msg)
 	case cmdLogoff:
 		delete(c.sessions, h.sessionID)
 		return simpleResponse(h, statusSuccess, 4), nil

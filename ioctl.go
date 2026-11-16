@@ -4,8 +4,11 @@ package smb
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 )
+
+var errValidateOn311 = errors.New("smb: FSCTL_VALIDATE_NEGOTIATE_INFO on a 3.1.1 connection")
 
 // The control codes this server answers. Everything else is refused by name.
 const (
@@ -34,6 +37,12 @@ func (c *conn) ioctl(h header, body []byte, msg []byte) ([]byte, error) {
 	inLen := int(binary.LittleEndian.Uint32(body[28:]))
 	switch code {
 	case fsctlValidateNegotiateInfo:
+		// [MS-SMB2] 3.3.5.15.12: on 3.1.1 the pre-authentication hash has
+		// already done this job, and a client that asks anyway is not following
+		// the dialect it negotiated: the connection is terminated.
+		if c.dialect == dialect311 {
+			return nil, errValidateOn311
+		}
 		if inOff < 0 || inLen < 24 || inOff+inLen > len(msg) {
 			return errorResponse(h, statusInvalidParameter), nil
 		}
