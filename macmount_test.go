@@ -49,6 +49,8 @@ func TestMacMount(t *testing.T) {
 	srv.Logger = slog.New(slog.NewTextHandler(&negotiated, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	srv.AddUser("alice", "hunter2")
 	srv.EncryptData = os.Getenv("SMB_ENCRYPT") == "server"
+	// SMB_REQUIRE_SIGNING=1: the server is the one that insists (RequireSigning).
+	srv.RequireSigning = os.Getenv("SMB_REQUIRE_SIGNING") != ""
 	if err := srv.Share("disk", mem, macShareOptions()...); err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +68,7 @@ func TestMacMount(t *testing.T) {
 	}
 	url := fmt.Sprintf("//alice:hunter2@127.0.0.1:%d/disk", port)
 	if out, err := exec.Command("mount_smbfs", url, mnt).CombinedOutput(); err != nil {
-		t.Fatalf("mount_smbfs: %v\n%s", err, out)
+		t.Fatalf("mount_smbfs: %v\n%s\nthe server logged:\n%s", err, out, negotiated.String())
 	}
 	defer exec.Command("umount", mnt).Run()
 
@@ -81,6 +83,9 @@ func TestMacMount(t *testing.T) {
 		t.Errorf("writing through the mount: %v", err)
 	}
 	t.Logf("macOS negotiated, as the server saw it:\n%s", strings.TrimSpace(negotiated.String()))
+	if os.Getenv("SMB_REQUIRE_SIGNING") != "" && !strings.Contains(negotiated.String(), "signing_required=true") {
+		t.Error("the server requires signing and the session does not record it")
+	}
 	if os.Getenv("SMB_ENCRYPT") != "" && !strings.Contains(negotiated.String(), "smb first encrypted request") {
 		t.Error("encryption was required, and no request arrived encrypted")
 	}

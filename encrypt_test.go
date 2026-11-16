@@ -678,6 +678,7 @@ func TestRequirementsRefuseAClientThatCannotEncrypt(t *testing.T) {
 	putU16(body[6:], uint16(len(path)))
 	req := append(requestOf(cmdTreeConnect, body), path...)
 	binary.LittleEndian.PutUint64(req[offSessionID:], 1)
+	putU32(req[offFlags:], flagSigned) // 3.1.1 refuses an unprotected TREE_CONNECT; see tree.go
 	if st := statusOf(t, mustDispatchRaw(t, c, req)); st != statusAccessDenied {
 		t.Errorf("TREE_CONNECT answered %#x, want ACCESS_DENIED", st)
 	}

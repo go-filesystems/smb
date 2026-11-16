@@ -145,6 +145,16 @@ func (c *conn) serverCaps(dialect uint16) uint32 {
 	return caps
 }
 
+// serverSecurityMode is what the server says in NEGOTIATE (and repeats in
+// VALIDATE_NEGOTIATE_INFO): signing is enabled, and required when
+// [Server.RequireSigning] says so ([MS-SMB2] 3.3.5.4).
+func (c *conn) serverSecurityMode() uint16 {
+	if c.srv.RequireSigning {
+		return signingEnabled | signingRequired
+	}
+	return signingEnabled
+}
+
 // chooseDialect is the greatest dialect both sides speak, or 0.
 func chooseDialect(offered []uint16) uint16 {
 	for _, ours := range dialectsWeSpeak {
@@ -166,7 +176,7 @@ func (c *conn) negotiateResponse(h header, dialect uint16, ctxs []outContext) []
 	b := append(responseTo(h, statusSuccess), make([]byte, bodyLen+len(sec))...)
 	body := b[headerLen:]
 	binary.LittleEndian.PutUint16(body[0:], 65)
-	binary.LittleEndian.PutUint16(body[2:], signingEnabled)
+	binary.LittleEndian.PutUint16(body[2:], c.serverSecurityMode())
 	binary.LittleEndian.PutUint16(body[4:], dialect)
 	binary.LittleEndian.PutUint32(body[24:], c.serverCaps(dialect))
 	copy(body[8:24], c.srv.guid[:]) // identity, not a secret -- and stable, because

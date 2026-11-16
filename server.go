@@ -71,6 +71,14 @@ type Server struct {
 	// To require it of one share only, use [RequireEncryption]. Set it before
 	// the first connection.
 	EncryptData bool
+	// RequireSigning makes the server require message signing of every client
+	// ([MS-SMB2] 3.3.5.4: SMB2_NEGOTIATE_SIGNING_REQUIRED in the NEGOTIATE
+	// response): every session is held to it, so a request that arrives neither
+	// signed nor encrypted is refused with STATUS_ACCESS_DENIED whether or not
+	// the client asked for signing. Windows clients require it already; this is
+	// what makes the server the one that insists. Set it before the first
+	// connection.
+	RequireSigning bool
 	// DisableEncryption stops the server offering encryption at all: no
 	// ENCRYPTION context is answered on 3.1.1 and the capability is not claimed
 	// on 3.0 and 3.0.2. It outranks [Server.EncryptData] and [RequireEncryption],
@@ -409,12 +417,15 @@ type conn struct {
 	preauth        []byte
 	pendingPreauth []byte
 	pendingSID     uint64 // the session id allocated to the challenge in progress
-	nextID         uint64
-	sessions       map[uint64]*session
-	trees          map[uint32]*treeConn
-	nextTree       uint32
-	pending        *challenge // the NTLM challenge sent, awaiting its answer
-	spnego         bool       // whether this client wraps its tokens, or sends them bare
+	// pendingReauth is the existing session a challenge in progress is for, when
+	// the exchange is that session authenticating again; nil for a new session.
+	pendingReauth *session
+	nextID        uint64
+	sessions      map[uint64]*session
+	trees         map[uint32]*treeConn
+	nextTree      uint32
+	pending       *challenge // the NTLM challenge sent, awaiting its answer
+	spnego        bool       // whether this client wraps its tokens, or sends them bare
 
 	panicked any // what a connection died of, for a test to insist on
 	files    map[[16]byte]*openFile
@@ -455,6 +466,10 @@ type session struct {
 	// message of it must be (Session.EncryptData, [MS-SMB2] 3.3.5.2.9).
 	crypto      *sessionCrypto
 	encryptData bool
+	// signingRequired is Session.SigningRequired ([MS-SMB2] 3.3.5.5.3 step 5): the
+	// client said, in its NEGOTIATE, that it requires signing. From then on a
+	// request that arrives neither signed nor encrypted is refused.
+	signingRequired bool
 }
 
 func (c *conn) serve() {
@@ -702,7 +717,7 @@ func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]
 		// The status is the previous one, not an invented one: the client sees
 		// the same reason twice and knows the chain did not happen.
 		if h.flags&flagRelatedOps != 0 && prevStatus != statusSuccess {
-			reply := errorResponse(h, prevStatus)
+			reply := compoundReply(errorResponse(h, prevStatus), h.nextCommand != 0)
 			if h.flags&flagSigned != 0 {
 				if sess := c.sessions[binary.LittleEndian.Uint64(one[offSessionID:])]; sess != nil {
 					signMessage(c.signAlgo(), sess.signingKey, reply)
@@ -741,8 +756,18 @@ func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]
 			return c.finish(out, prevAt, errorResponse(h, statusUserSessionDeleted), nil, h), nil
 		}
 		signed := h.flags&flagSigned != 0 && !encrypted
+		// [MS-SMB2] 3.3.5.2.4: "the server MUST determine if the client failed to
+		// sign a packet that required it": an unsigned request on a session that
+		// requires signing is refused. An encrypted one is authenticated by its
+		// cipher, which is what an encrypting session uses instead of a
+		// signature. CANCEL is verified only when it is signed (3.3.5.16).
+		if !signed && !encrypted && sess != nil && sess.signingRequired && commandIsSigned(h.command) {
+			c.logRefused(h, "not signed, and the session requires signing")
+			return c.finish(out, prevAt, errorResponse(h, statusAccessDenied), sess, h), nil
+		}
 		if signed {
 			if sess == nil || !verifyMessage(c.signAlgo(), sess.signingKey, one) {
+				c.logRefused(h, "the signature does not verify")
 				return c.finish(out, prevAt, errorResponse(h, statusAccessDenied), sess, h), nil
 			}
 		}
@@ -764,6 +789,9 @@ func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]
 		reply, err := c.dispatchEnc(one, encrypted, credited)
 		if err != nil {
 			return nil, err
+		}
+		if reply != nil {
+			reply = compoundReply(reply, h.nextCommand != 0)
 		}
 		// Signed in kind: a client that signed its request checks the reply,
 		// and one that did not would reject a signature it cannot verify.
@@ -795,12 +823,43 @@ func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]
 	}
 }
 
+// compoundReply readies one reply of a chain for signing. When more requests
+// follow in the chain, more replies will follow this one, so it is padded to an
+// eight-byte boundary and its NextCommand says how far the next one is -- and this
+// is done BEFORE it is signed, because the signature covers the whole header and
+// "any padding at the end of the message MUST be used in the hash computation"
+// ([MS-SMB2] 3.1.4.1). Signing first and padding after, which this server did,
+// produced a signature no client that verifies compounded replies can accept:
+// macOS, once the server required signing, dropped the mount after its first
+// CREATE + QUERY_INFO + CLOSE.
+func compoundReply(reply []byte, more bool) []byte {
+	if !more || len(reply) < headerLen {
+		return reply
+	}
+	for len(reply)%8 != 0 {
+		reply = append(reply, 0)
+	}
+	binary.LittleEndian.PutUint32(reply[offNextCommand:], uint32(len(reply)))
+	return reply
+}
+
 // commandNeedsSession is false for the commands that are legitimate with no
 // session: NEGOTIATE and SESSION_SETUP come before one exists, ECHO is a
 // keep-alive, and CANCEL only names an operation of this connection.
 func commandNeedsSession(cmd command) bool {
 	switch cmd {
 	case cmdNegotiate, cmdSessionSetup, cmdEcho, cmdCancel:
+		return false
+	}
+	return true
+}
+
+// commandIsSigned is true for the commands a session that requires signing must
+// sign: all but the two that come before there is a session key, and CANCEL, which
+// the specification verifies only if it is signed (3.3.5.16).
+func commandIsSigned(cmd command) bool {
+	switch cmd {
+	case cmdNegotiate, cmdSessionSetup, cmdCancel:
 		return false
 	}
 	return true

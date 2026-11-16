@@ -78,7 +78,7 @@ func (c *conn) ioctl(h header, body []byte, msg []byte) ([]byte, error) {
 		out := make([]byte, 24)
 		binary.LittleEndian.PutUint32(out[0:], c.serverCaps(c.dialect)) // as NEGOTIATE said
 		copy(out[4:], c.srv.guid[:])
-		binary.LittleEndian.PutUint16(out[20:], signingEnabled)
+		binary.LittleEndian.PutUint16(out[20:], c.serverSecurityMode())
 		binary.LittleEndian.PutUint16(out[22:], c.dialect)
 		return ioctlResponse(h, code, out, [16]byte{}, statusSuccess), nil
 
