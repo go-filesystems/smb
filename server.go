@@ -63,6 +63,20 @@ type Server struct {
 	// connection. Set it before the first connection.
 	RecordTimeout time.Duration
 	pool          *inflight.Pool // made by the first connection
+
+	// EncryptData requires encryption of every session: a client that cannot
+	// encrypt (SMB 2.1, or 3.x with no cipher in common) is refused at
+	// SESSION_SETUP with STATUS_ACCESS_DENIED, and one that can is told to
+	// (SMB2_SESSION_FLAG_ENCRYPT_DATA) and has any unencrypted request refused.
+	// To require it of one share only, use [RequireEncryption]. Set it before
+	// the first connection.
+	EncryptData bool
+	// DisableEncryption stops the server offering encryption at all: no
+	// ENCRYPTION context is answered on 3.1.1 and the capability is not claimed
+	// on 3.0 and 3.0.2. It outranks [Server.EncryptData] and [RequireEncryption],
+	// whose shares then refuse every connection. Set it before the first
+	// connection.
+	DisableEncryption bool
 }
 
 type share struct {
@@ -81,6 +95,9 @@ type share struct {
 	// timePolicy is what happens to a time a client sets and the server cannot
 	// store. See [TimePolicy]; the zero value is the default, [TimesIgnore].
 	timePolicy TimePolicy
+	// encrypt is [RequireEncryption]: every request on this share must arrive
+	// encrypted, and the TREE_CONNECT response says so.
+	encrypt bool
 
 	// locks are the byte ranges applications have reserved on this share.
 	// They belong to the share rather than to a connection because that is
@@ -120,6 +137,15 @@ type ShareOption func(*share)
 // ReadOnly refuses every write on this share, whatever the driver underneath
 // would have allowed.
 func ReadOnly() ShareOption { return func(s *share) { s.ro = true } }
+
+// RequireEncryption makes this share refuse everything that is not encrypted
+// ([MS-SMB2] 3.3.5.2.11, with Share.EncryptData and RejectUnencryptedAccess
+// both TRUE). TREE_CONNECT answers SMB2_SHAREFLAG_ENCRYPT_DATA, so a client
+// encrypts from then on; a request on the share that arrives unencrypted is
+// answered STATUS_ACCESS_DENIED, and everything the server sends on it is
+// encrypted. A client that cannot encrypt -- SMB 2.1, or 3.x with no cipher in
+// common -- is refused at TREE_CONNECT with STATUS_ACCESS_DENIED.
+func RequireEncryption() ShareOption { return func(s *share) { s.encrypt = true } }
 
 // WithCapacity sets the total and available byte counts this share reports
 // as its size and free space (FileFsSizeInformation and
@@ -370,6 +396,9 @@ type conn struct {
 	// signingAlgorithm is the id negotiated by SMB2_SIGNING_CAPABILITIES
 	// (AES-CMAC when none was); see sigAlgoFor.
 	signingAlgorithm uint16
+	// cipherID is the cipher negotiated by SMB2_ENCRYPTION_CAPABILITIES (3.1.1;
+	// zero for none). See encCapable.
+	cipherID uint16
 	// preauth is the pre-authentication integrity hash after NEGOTIATE (3.1.1
 	// only); pendingPreauth continues it through the SESSION_SETUP exchange in
 	// progress. See preauth.go.
@@ -418,6 +447,10 @@ type session struct {
 	user       string
 	sessionKey []byte
 	signingKey []byte
+	// crypto is nil on a session that cannot encrypt; encryptData says every
+	// message of it must be (Session.EncryptData, [MS-SMB2] 3.3.5.2.9).
+	crypto      *sessionCrypto
+	encryptData bool
 }
 
 func (c *conn) serve() {
@@ -514,6 +547,11 @@ func (c *conn) serve() {
 // The replies are chained the same way. Each one but the last is padded to an
 // eight-byte boundary, because the offset that points at its successor has to
 // land on one.
+//
+// A frame that begins with a TRANSFORM_HEADER is decrypted first, and what the
+// chain answers is encrypted again, as one unit, when the request was encrypted
+// or when the session or the share it touched requires it ([MS-SMB2]
+// 3.3.4.1.4).
 func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 	// The legacy greeting is not an SMB2 message and has no header to parse,
 	// so it is answered before the loop that reads one. Putting this check
@@ -523,6 +561,54 @@ func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 	if len(msg) >= 4 && [4]byte(msg[:4]) == smb1ProtocolID {
 		return c.legacyNegotiateResponse()
 	}
+	encrypted, tsid := false, uint64(0)
+	if len(msg) >= 4 && [4]byte(msg[:4]) == transformProtocolID {
+		plain, sid, err := c.decryptFrame(msg)
+		if err != nil {
+			return nil, err
+		}
+		msg, encrypted, tsid = plain, true, sid
+	}
+	var seal sealing // who to encrypt the reply for; the zero value is "nobody"
+	if encrypted {
+		// decryptFrame found the session, which a LOGOFF in this very frame may
+		// remove: the reply to it is still encrypted, so the keys are held here.
+		seal = sealing{tsid, c.sessions[tsid].crypto}
+	}
+	out, err := c.chain(msg, encrypted, tsid, &seal)
+	if err != nil || out == nil || seal.crypto == nil {
+		return out, err
+	}
+	return seal.crypto.seal(seal.sid, out), nil
+}
+
+// sealing names the session a reply is to be encrypted for, and its keys.
+type sealing struct {
+	sid    uint64
+	crypto *sessionCrypto
+}
+
+// replyMustBeEncrypted is [MS-SMB2] 3.3.4.1.4 for a reply to an unencrypted
+// request: everything but NEGOTIATE and SESSION_SETUP on a session that
+// requires encryption, and everything but those and TREE_CONNECT on a share that
+// does. (A reply to an encrypted request is always encrypted.)
+func (c *conn) replyMustBeEncrypted(cmd command, sess *session, tree *treeConn) bool {
+	if cmd == cmdNegotiate || cmd == cmdSessionSetup || sess == nil || sess.crypto == nil {
+		return false
+	}
+	if sess.encryptData {
+		return true
+	}
+	if cmd == cmdTreeConnect {
+		return false
+	}
+	return tree != nil && tree.sh.encrypt
+}
+
+// chain is the loop of dispatchChain over plaintext requests. encrypted says the
+// frame arrived encrypted for session tsid; *seal is set to the session to
+// encrypt the reply for when a request of an unencrypted frame needs it.
+func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]byte, error) {
 	var (
 		out       []byte
 		prevAt    = -1 // where the previous reply's header starts, inside out
@@ -546,6 +632,18 @@ func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 			end = int(h.nextCommand)
 		}
 		one := msg[:end]
+		// [MS-SMB2] 3.3.5.2.1.1: inside an encrypted frame every operation that
+		// is not related to the one before names the session the frame was
+		// encrypted for, and the first one cannot be related to anything.
+		if encrypted {
+			if h.flags&flagRelatedOps == 0 {
+				if binary.LittleEndian.Uint64(one[offSessionID:]) != tsid {
+					return nil, errTransform
+				}
+			} else if !haveFirst {
+				return nil, errTransform
+			}
+		}
 		// The related-operations flag means this request speaks about what the
 		// first one opened: it carries no session or tree of its own.
 		if haveFirst && h.flags&flagRelatedOps != 0 {
@@ -598,6 +696,10 @@ func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 		// A signed request is verified before it is read. A signature that
 		// does not check out is not a request from the party that
 		// authenticated, whatever it says in its header.
+		//
+		// A message that arrived encrypted was authenticated by its cipher, and
+		// is not checked again ([MS-SMB2] 3.3.5.2.4: "and the message is not
+		// encrypted").
 		sess := c.sessions[binary.LittleEndian.Uint64(one[offSessionID:])]
 		// [MS-SMB2] 3.3.5.2.9: every command but the ones that come before there is
 		// a session names an authenticated session. Without this a request that
@@ -606,19 +708,34 @@ func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 		if sess == nil && commandNeedsSession(h.command) {
 			return c.finish(out, prevAt, errorResponse(h, statusUserSessionDeleted), nil, h), nil
 		}
-		if h.flags&flagSigned != 0 {
+		signed := h.flags&flagSigned != 0 && !encrypted
+		if signed {
 			if sess == nil || !verifyMessage(c.signAlgo(), sess.signingKey, one) {
 				return c.finish(out, prevAt, errorResponse(h, statusAccessDenied), sess, h), nil
 			}
 		}
 
-		reply, err := c.dispatch(one)
+		// Encryption that a session or a share requires: a request that does not
+		// come encrypted is refused, and the refusal is itself encrypted
+		// ([MS-SMB2] 3.3.5.2.9, 3.3.5.2.11, 3.3.4.1.4).
+		tree := c.treeOf(binary.LittleEndian.Uint64(one[offSessionID:]), binary.LittleEndian.Uint32(one[offTreeID:]))
+		if !encrypted && c.encryptionRequired(h.command, sess, tree) {
+			if c.replyMustBeEncrypted(h.command, sess, tree) && seal.crypto == nil {
+				*seal = sealing{binary.LittleEndian.Uint64(one[offSessionID:]), sess.crypto}
+			}
+			return c.finish(out, prevAt, errorResponse(h, statusAccessDenied), sess, h), nil
+		}
+		if !encrypted && seal.crypto == nil && c.replyMustBeEncrypted(h.command, sess, tree) {
+			*seal = sealing{binary.LittleEndian.Uint64(one[offSessionID:]), sess.crypto}
+		}
+
+		reply, err := c.dispatchEnc(one, encrypted)
 		if err != nil {
 			return nil, err
 		}
 		// Signed in kind: a client that signed its request checks the reply,
 		// and one that did not would reject a signature it cannot verify.
-		if reply != nil && h.flags&flagSigned != 0 && sess != nil {
+		if reply != nil && signed && sess != nil {
 			signMessage(c.signAlgo(), sess.signingKey, reply)
 		}
 		if h.command == cmdLogoff && sess != nil {
@@ -681,9 +798,36 @@ func withInheritedIDs(msg []byte, first header) []byte {
 	return out
 }
 
+// encryptionRequired says a request must have arrived encrypted and did not:
+// its session requires encryption, or the share its tree is connected to does
+// ([MS-SMB2] 3.3.5.2.9 and 3.3.5.2.11). NEGOTIATE and SESSION_SETUP come before
+// there is a session to ask, and TREE_CONNECT is how the share's own rule is
+// announced, so only the session's rule applies to it.
+//
+// The tree is the one in the REQUEST'S OWN SESSION (see treeOf): a tree id that
+// belongs to another session is no tree, not a way round the share's rule.
+func (c *conn) encryptionRequired(cmd command, sess *session, tree *treeConn) bool {
+	if cmd == cmdNegotiate || cmd == cmdSessionSetup || sess == nil {
+		return false
+	}
+	if sess.encryptData {
+		return true
+	}
+	if cmd == cmdTreeConnect {
+		return false
+	}
+	return tree != nil && tree.sh.encrypt
+}
+
 // dispatch answers one message. An error stops the connection; a nil response
 // means there is nothing to send back.
 func (c *conn) dispatch(msg []byte) ([]byte, error) {
+	return c.dispatchEnc(msg, false)
+}
+
+// dispatchEnc is dispatch for a message that did, or did not, arrive encrypted:
+// an operation that answers later must answer encrypted too.
+func (c *conn) dispatchEnc(msg []byte, encrypted bool) ([]byte, error) {
 	// The legacy greeting is the one SMB1 message this server reads, and the
 	// only answer it gives is an SMB2 negotiate response naming the wildcard
 	// dialect: "ask me again in SMB2".
@@ -694,6 +838,7 @@ func (c *conn) dispatch(msg []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	h.encrypted = encrypted
 	body := msg[headerLen:]
 	if c.dialect != 0 && h.command != cmdNegotiate && creditChargeTooLow(h, body) {
 		return errorResponse(h, statusInvalidParameter), nil

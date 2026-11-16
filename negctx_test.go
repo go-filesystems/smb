@@ -74,8 +74,8 @@ func TestNegotiateContextsAnswered(t *testing.T) {
 		t.Fatalf("dialect %#04x, want 3.1.1", got)
 	}
 	body := resp[headerLen:]
-	if n := leU16(body[6:]); n != 2 {
-		t.Fatalf("%d contexts answered, want 2 (preauth, signing; no encryption yet)", n)
+	if n := leU16(body[6:]); n != 3 {
+		t.Fatalf("%d contexts answered, want 3 (preauth, encryption, signing)", n)
 	}
 	off := int(binary.LittleEndian.Uint32(body[60:]))
 	if off%8 != 0 || off < headerLen+64 {
@@ -97,10 +97,20 @@ func TestNegotiateContextsAnswered(t *testing.T) {
 	if bytes.Equal(d[6:6+32], salt) {
 		t.Error("the salt is the client's, not fresh")
 	}
-	// Signing: exactly the one chosen, GMAC because it was offered first.
-	next := (off + 8 + dl + 7) &^ 7
-	if typ := leU16(resp[next:]); typ != ctxSigning {
+	// Encryption: the client offered GCM first and CCM second, and the server
+	// answers with exactly one cipher, AES-128-GCM.
+	enc := (off + 8 + dl + 7) &^ 7
+	if typ := leU16(resp[enc:]); typ != ctxEncryption {
 		t.Fatalf("second context type %#x", typ)
+	}
+	ed := resp[enc+8 : enc+8+int(leU16(resp[enc+2:]))]
+	if leU16(ed[0:]) != 1 || leU16(ed[2:]) != cipherAES128GCM {
+		t.Errorf("encryption answer %x", ed)
+	}
+	// Signing: exactly the one chosen, GMAC because it was offered first.
+	next := (enc + 8 + len(ed) + 7) &^ 7
+	if typ := leU16(resp[next:]); typ != ctxSigning {
+		t.Fatalf("third context type %#x", typ)
 	}
 	sd := resp[next+8 : next+8+int(leU16(resp[next+2:]))]
 	if leU16(sd[0:]) != 1 || leU16(sd[2:]) != signIDAESGMAC {
@@ -140,7 +150,8 @@ func TestNegotiateSigningChoice(t *testing.T) {
 			if c.signAlgo() != tc.want {
 				t.Errorf("signs with %v, want %v", c.signAlgo(), tc.want)
 			}
-			// With no SIGNING context in the request there is none in the answer.
+			// With no SIGNING context in the request there is none in the answer
+			// (and these requests carry no ENCRYPTION context either).
 			wantCtx := 1
 			if len(tc.offered) > 0 {
 				wantCtx = 2

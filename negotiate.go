@@ -79,6 +79,7 @@ func (c *conn) negotiate(h header, body, msg []byte) ([]byte, error) {
 	var (
 		ctxs     []outContext
 		hashID   uint16
+		cipherID = cipherNone
 		signAlgo = signIDAESCMAC
 	)
 	if chosen == dialect311 {
@@ -100,6 +101,13 @@ func (c *conn) negotiate(h header, body, msg []byte) ([]byte, error) {
 		salt := make([]byte, 32)
 		rand.Read(salt)
 		ctxs = append(ctxs, preauthContext(hashID, salt))
+		// [MS-SMB2] 3.3.5.4: an ENCRYPTION context the server supports is
+		// ALWAYS answered, with cipher 0 when nothing is shared, so that a client
+		// can tell "no common cipher" from "does not encrypt" (no context).
+		if cc.hasCipher && !c.srv.DisableEncryption {
+			cipherID = chooseCipher(cc.ciphers)
+			ctxs = append(ctxs, cipherContext(cipherID))
+		}
 		if cc.hasSigning {
 			signAlgo = chooseSigning(cc.signing)
 			ctxs = append(ctxs, signingContext(signAlgo))
@@ -114,6 +122,7 @@ func (c *conn) negotiate(h header, body, msg []byte) ([]byte, error) {
 	c.clientSecurityMode = binary.LittleEndian.Uint16(body[4:])
 	c.clientCapabilities = binary.LittleEndian.Uint32(body[8:])
 	c.signingAlgorithm = signAlgo
+	c.cipherID = cipherID
 	resp := c.negotiateResponse(h, chosen, ctxs)
 	if chosen == dialect311 {
 		// The chain starts at zero and takes the request and the response as
@@ -121,6 +130,19 @@ func (c *conn) negotiate(h header, body, msg []byte) ([]byte, error) {
 		c.preauth = preauthExtend(preauthExtend(preauthStart(), msg), resp)
 	}
 	return resp, nil
+}
+
+// serverCaps is what the server claims in NEGOTIATE and again in
+// VALIDATE_NEGOTIATE_INFO. SMB2_GLOBAL_CAP_ENCRYPTION is claimed on 3.0 and
+// 3.0.2 to a client that has it, and on no other dialect: 3.1.1 negotiates a
+// cipher in a context instead, and its response table marks the bit as invalid
+// ([MS-SMB2] 2.2.4).
+func (c *conn) serverCaps(dialect uint16) uint32 {
+	caps := capabilitiesFor(dialect)
+	if (dialect == dialect300 || dialect == dialect302) && c.encCapable() {
+		caps |= capEncryption
+	}
+	return caps
 }
 
 // chooseDialect is the greatest dialect both sides speak, or 0.
@@ -146,7 +168,7 @@ func (c *conn) negotiateResponse(h header, dialect uint16, ctxs []outContext) []
 	binary.LittleEndian.PutUint16(body[0:], 65)
 	binary.LittleEndian.PutUint16(body[2:], signingEnabled)
 	binary.LittleEndian.PutUint16(body[4:], dialect)
-	binary.LittleEndian.PutUint32(body[24:], capabilitiesFor(dialect))
+	binary.LittleEndian.PutUint32(body[24:], c.serverCaps(dialect))
 	copy(body[8:24], c.srv.guid[:]) // identity, not a secret -- and stable, because
 	//                                 the validate-negotiate exchange below
 	//                                 compares it against what was sent here

@@ -88,8 +88,8 @@ and the **two traps** that make this hard to do at all.
 | signing | **HMAC-SHA256** for 2.x, **AES-CMAC** for 3.x, and **AES-GMAC** on 3.1.1 when the client offers it (`SMB2_SIGNING_CAPABILITIES`), all implemented here |
 | dialects | 2.1, 3.0, 3.0.2 and **3.1.1** — Linux mounts with no `vers=` at all, and macOS `mount_smbfs` settles on 3.1.1 |
 | 3.1.1 | negotiate contexts (`PREAUTH_INTEGRITY_CAPABILITIES` with SHA-512, `SIGNING_CAPABILITIES`), the pre-authentication integrity hash over NEGOTIATE and SESSION_SETUP, and the signing key derived from it (`SMBSigningKey`), as MS-SMB2 3.3.5.4 and 3.3.5.5.3 describe. A 3.1.1 connection that sends `FSCTL_VALIDATE_NEGOTIATE_INFO` is terminated (3.3.5.15.12); on 3.0 and 3.0.2 the validation compares the dialect list, the GUID, the security mode and the capabilities, and a mismatch terminates the connection too |
-| sessions | every command but NEGOTIATE, SESSION_SETUP, ECHO and CANCEL must name an authenticated session (`STATUS_USER_SESSION_DELETED` otherwise, 3.3.5.2.9); a tree belongs to the session that connected it and LOGOFF drops it, with its handles and pending operations; an answer sent later is signed with the key of the session that asked and is dropped when that session is gone. Session and signing keys are wiped at LOGOFF and at disconnect |
-| encryption | **not yet** — no `ENCRYPTION_CAPABILITIES` context is answered, so a client sees a server that does not offer it |
+| sessions | every command but NEGOTIATE, SESSION_SETUP, ECHO and CANCEL must name an authenticated session (`STATUS_USER_SESSION_DELETED` otherwise, 3.3.5.2.9); a tree belongs to the session that connected it and LOGOFF drops it, with its handles and pending operations; an answer sent later is signed (or encrypted) with the key of the session that asked and is dropped when that session is gone. Session and signing keys are wiped at LOGOFF and at disconnect |
+| encryption | **AES-128-CCM** on 3.0 and 3.0.2; on 3.1.1 **AES-128-GCM, AES-128-CCM, AES-256-GCM, AES-256-CCM** negotiated by the `ENCRYPTION_CAPABILITIES` context. `TRANSFORM_HEADER`, a key per direction, a nonce counter per session; a frame that fails to decrypt ends the connection. Offered by default (`Server.DisableEncryption` turns it off); **required** per share with `smb.RequireEncryption()` (`SMB2_SHAREFLAG_ENCRYPT_DATA`; unencrypted requests get `STATUS_ACCESS_DENIED`, a client that cannot encrypt is refused at TREE_CONNECT) or for every session with `Server.EncryptData` (`SMB2_SESSION_FLAG_ENCRYPT_DATA`; refused at SESSION_SETUP). Not done: SMB compression, and encrypted READs run one at a time rather than beside others |
 | byte-range locks | taken, released and **enforced** on reads and writes, including *waiting* for one |
 | change notification | on changes that go **through this server** — one made in the image by something else is invisible, because nothing underneath tells us |
 | asynchronous replies | `STATUS_PENDING` with an AsyncId, and `CANCEL` |
@@ -120,16 +120,20 @@ client's back. macOS and Linux never send a chain whose first operation fails,
 and the Go client never chains at all.
 
 What is still unchecked: this ran through a QEMU guest-forward rather than on
-port 445 itself; the Windows run above predates 3.1.1 (it negotiated 3.0.2) and
-has not been repeated; and encryption is absent whatever the client is.
+port 445 itself; and the Windows run above predates 3.1.1 and encryption (it
+negotiated 3.0.2, `Encrypted False`) and has not been repeated.
 
 **3.1.1, read from the server's side.** A session logs what it negotiated at
-`Debug` level on `Server.Logger`: `dialect=3.1.1 signing=AES-128-GMAC`.
+`Debug` level on `Server.Logger`: `dialect=3.1.1 signing=AES-128-GMAC cipher=AES-128-GCM`, and a line saying the
+first request of the session really arrived encrypted.
 macOS 26's `mount_smbfs` negotiates exactly that (`go test -tags macmount -run
 TestMacMount -v`); the Linux kernel client in CI mounts with no `vers=` and the
 lane asserts the session says `dialect=3.1.1`; go-smb2, a foreign client that
 checks the signature of the last SESSION_SETUP response, negotiates 3.1.1 and
-AES-CMAC (it does not offer AES-GMAC) in the unit tests.
+AES-CMAC (it does not offer AES-GMAC) in the unit tests, and reads and writes
+560 kB through a share that requires encryption on 3.0, 3.0.2 and 3.1.1. A
+second Linux lane mounts a `RequireEncryption` share with no `seal` option and
+asserts that requests arrived encrypted.
 
 **Sizes a client names are bounded before they are allocated.** Where a
 driver has neither positional writes nor `Truncate`, a WRITE or an

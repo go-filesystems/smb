@@ -5,6 +5,7 @@ package smb
 import (
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"strings"
 )
 
@@ -67,7 +68,7 @@ func (c *conn) treeConnect(h header, body []byte, msg []byte) ([]byte, error) {
 		// pipe implementation and was a permission it was told it did not
 		// have. The read-only flag on the tree stays: it is about a
 		// filesystem, and IPC$ has none.
-		return treeConnectResponse(h, shareTypePipe, accessAll), nil
+		return treeConnectResponse(h, shareTypePipe, 0, accessAll), nil
 	}
 	sh := c.srv.shareByName(name)
 	if sh == nil {
@@ -83,6 +84,11 @@ func (c *conn) treeConnect(h header, body []byte, msg []byte) ([]byte, error) {
 	if !sh.mayConnect(user) {
 		return errorResponse(h, statusAccessDenied), nil
 	}
+	// [MS-SMB2] 3.3.5.7: a share that requires encryption does not admit a
+	// client that cannot encrypt.
+	if sh.encrypt && !c.encCapable() {
+		return errorResponse(h, statusAccessDenied), nil
+	}
 	ro := sh.readOnlyFor(user)
 	c.nextTree++
 	tid := c.nextTree
@@ -93,15 +99,30 @@ func (c *conn) treeConnect(h header, body []byte, msg []byte) ([]byte, error) {
 		access = accessRead
 	}
 	h.treeID = tid
-	return treeConnectResponse(h, shareTypeDisk, access), nil
+	var flags uint32
+	if sh.encrypt {
+		flags |= shareFlagEncryptData
+	}
+	c.logTree(sh.name, sh.encrypt)
+	return treeConnectResponse(h, shareTypeDisk, flags, access), nil
 }
 
-func treeConnectResponse(h header, kind uint8, access uint32) []byte {
+// logTree says, on the server's Logger at Debug level, that a share was
+// connected and whether it requires encryption.
+func (c *conn) logTree(name string, encrypt bool) {
+	l := slog.Default()
+	if c.srv != nil && c.srv.Logger != nil {
+		l = c.srv.Logger
+	}
+	l.Debug("smb tree connected", "share", name, "encrypt_data", encrypt)
+}
+
+func treeConnectResponse(h header, kind uint8, extraFlags, access uint32) []byte {
 	b := append(responseTo(h, statusSuccess), make([]byte, 16)...)
 	rb := b[headerLen:]
 	binary.LittleEndian.PutUint16(rb[0:], 16)
 	rb[2] = kind
-	binary.LittleEndian.PutUint32(rb[4:], shareFlagManualCaching)
+	binary.LittleEndian.PutUint32(rb[4:], shareFlagManualCaching|extraFlags)
 	binary.LittleEndian.PutUint32(rb[8:], 0) // capabilities: none of the cluster ones
 	binary.LittleEndian.PutUint32(rb[12:], access)
 	return b
