@@ -82,4 +82,8 @@ func (s *share) readOnlyFor(user string) bool {
 type treeConn struct {
 	sh *share
 	ro bool
+	// session is the session this tree was connected in. A tree lives in its
+	// session ([MS-SMB2] 3.3.5.2.11: it is looked up in Session.TreeConnectTable),
+	// so another session naming its id finds nothing, and LOGOFF drops it.
+	session uint64
 }

@@ -59,7 +59,7 @@ func (c *conn) treeConnect(h header, body []byte, msg []byte) ([]byte, error) {
 	if strings.EqualFold(name, "IPC$") {
 		c.nextTree++
 		tid := c.nextTree
-		c.trees[tid] = &treeConn{sh: &share{name: "IPC$", ipc: true, ro: true}, ro: true}
+		c.trees[tid] = &treeConn{sh: &share{name: "IPC$", ipc: true, ro: true}, ro: true, session: h.sessionID}
 		h.treeID = tid
 		// FULL access, not read: a remote procedure call is WRITTEN to the
 		// pipe. `smbutil view` reads the mask on the tree and gives up before
@@ -92,7 +92,7 @@ func (c *conn) treeConnect(h header, body []byte, msg []byte) ([]byte, error) {
 	ro := sh.readOnlyFor(user)
 	c.nextTree++
 	tid := c.nextTree
-	c.trees[tid] = &treeConn{sh: sh, ro: ro}
+	c.trees[tid] = &treeConn{sh: sh, ro: ro, session: h.sessionID}
 
 	access := accessAll
 	if ro {
@@ -128,7 +128,16 @@ func treeConnectResponse(h header, kind uint8, extraFlags, access uint32) []byte
 	return b
 }
 
-// tree returns the share a message is addressed to, as connected.
+// tree returns the share a message is addressed to, as connected IN THE
+// SESSION THAT SENT IT: a tree id from another session is no tree at all.
 func (c *conn) tree(h header) *treeConn {
-	return c.trees[h.treeID]
+	return c.treeOf(h.sessionID, h.treeID)
+}
+
+// treeOf looks a tree up in a session's own table.
+func (c *conn) treeOf(session uint64, id uint32) *treeConn {
+	if t := c.trees[id]; t != nil && t.session == session {
+		return t
+	}
+	return nil
 }

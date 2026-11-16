@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -68,18 +69,7 @@ func (c *conn) negotiate(h header, body, msg []byte) ([]byte, error) {
 	for i, off := 0, 36; i < count && off+2 <= len(body); i, off = i+1, off+2 {
 		offered = append(offered, binary.LittleEndian.Uint16(body[off:]))
 	}
-	chosen := uint16(0)
-	for _, ours := range dialectsWeSpeak {
-		for _, theirs := range offered {
-			if ours == theirs {
-				chosen = ours
-				break
-			}
-		}
-		if chosen != 0 {
-			break
-		}
-	}
+	chosen := chooseDialect(offered)
 	if chosen == 0 {
 		// NOT_SUPPORTED rather than a dialect nobody asked for: a client told
 		// "0x0210" when it never offered it has no way to interpret the rest.
@@ -125,6 +115,10 @@ func (c *conn) negotiate(h header, body, msg []byte) ([]byte, error) {
 	}
 
 	c.dialect = chosen
+	// What VALIDATE_NEGOTIATE_INFO will be compared with ([MS-SMB2] 3.3.5.4:
+	// Connection.ClientDialects and Connection.ClientGuid).
+	c.clientDialects = offered
+	copy(c.clientGuid[:], body[12:28])
 	c.clientSecurityMode = binary.LittleEndian.Uint16(body[4:])
 	c.clientCapabilities = binary.LittleEndian.Uint32(body[8:])
 	c.signingAlgorithm = signAlgo
@@ -149,6 +143,16 @@ func (c *conn) serverCaps(dialect uint16) uint32 {
 		caps |= capEncryption
 	}
 	return caps
+}
+
+// chooseDialect is the greatest dialect both sides speak, or 0.
+func chooseDialect(offered []uint16) uint16 {
+	for _, ours := range dialectsWeSpeak {
+		if slices.Contains(offered, ours) {
+			return ours
+		}
+	}
+	return 0
 }
 
 // negotiateResponse builds the header and body of a NEGOTIATE response. ctxs

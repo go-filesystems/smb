@@ -69,6 +69,9 @@ func (f *tinyFS) ReadLink(string) (string, error) { return "", os.ErrInvalid }
 func opened(t *testing.T, fsys filesystem.Filesystem, path string, ro bool) (*conn, *openFile) {
 	t.Helper()
 	c := newConn(New(), nil)
+	// Session 0 is what these fixtures' headers carry: every command names an
+	// authenticated session ([MS-SMB2] 3.3.5.2.9), and a tree belongs to one.
+	c.sessions[0] = &session{user: "alice"}
 	sh := &share{name: "disk", fsys: fsys, ro: ro}
 	c.trees[1] = &treeConn{sh: sh, ro: ro}
 	st, err := fsys.Stat(path)

@@ -4,20 +4,12 @@ import (
 	"bytes"
 	"crypto/aes"
 	"encoding/binary"
-	"encoding/hex"
+	"net"
 	"testing"
+	"time"
 )
 
 // ─── AES-CCM ─────────────────────────────────────────────────────────────────
-
-func unhex(t testing.TB, s string) []byte {
-	t.Helper()
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b
-}
 
 // RFC 3610 section 8, Packet Vector #1 (opened 2026-11-16): the standard's own
 // vector, with an 8-byte tag and a 13-byte nonce, which is why newCCM takes both
@@ -225,6 +217,53 @@ func TestCipherKeyDerivation(t *testing.T) {
 	probe(c, kdf(sk, "SMBS2CCipherKey\x00", string(pre), 256), kdf(sk, "SMBC2SCipherKey\x00", string(pre), 256))
 	c = &conn{srv: New(), dialect: dialect302}
 	probe(c, kdf(sk, "SMB2AESCCM\x00", "ServerOut\x00", 128), kdf(sk, "SMB2AESCCM\x00", "ServerIn \x00", 128))
+}
+
+// The published worked examples (see kat_test.go for the source): the keys are
+// listed from the CLIENT's side -- "EncryptionKey (Client) = DecryptionKey
+// (Server)" -- so the server's DecryptionKey is the published EncryptionKey and
+// the server's EncryptionKey the published DecryptionKey.
+func TestCipherKeysKnownAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		dialect, cipher      uint16
+		sessionKey           string
+		preauth              string
+		clientEnc, clientDec string
+	}{
+		{"3.0", dialect300, cipherNone, "7CD451825D0450D235424E44BA6E78CC", "",
+			"FAD27796665B313EBB578F388632B4F7", "B0F0427F7CEB416D1D9DCC0CD4F99447"},
+		{"3.1.1 AES-128-GCM", dialect311, cipherAES128GCM, "270E1BA896585EEB7AF3472D3B4C75A7",
+			"0DD13628CC3ED218EF9DF9772D436D0887AB9814BFAE63A80AA845F36909DB7928622DDDAD522D97" +
+				"51640A459762C5A9D6BB084CBB3CE6BDADEF5D5BCE3C6C01",
+			"629BCBC54422A0F572B97F45989B6073", "E2AF0DCEFAC68DA71A0DFBD0D1350D74"},
+	} {
+		c := &conn{srv: New(), dialect: tc.dialect, cipherID: tc.cipher}
+		enc, dec, err := c.deriveCipherKeys(unhex(t, tc.sessionKey), unhex(t, tc.preauth))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Compare by what the keys do: a probe sealed under the server's key and
+		// under an AEAD built from the published one must be the same bytes.
+		for name, pair := range map[string]struct {
+			got interface {
+				Seal(dst, nonce, pt, aad []byte) []byte
+			}
+			published string
+		}{
+			"the server's DecryptionKey (the client's EncryptionKey)": {dec, tc.clientEnc},
+			"the server's EncryptionKey (the client's DecryptionKey)": {enc, tc.clientDec},
+		} {
+			want, err := newCipherAEAD(c.sessionCipher(), unhex(t, pair.published))
+			if err != nil {
+				t.Fatal(err)
+			}
+			nonce := make([]byte, want.NonceSize())
+			if !bytes.Equal(pair.got.Seal(nil, nonce, []byte("probe"), nil), want.Seal(nil, nonce, []byte("probe"), nil)) {
+				t.Errorf("%s: %s is not the published key %s", tc.name, name, pair.published)
+			}
+		}
+	}
 }
 
 func TestChooseCipher(t *testing.T) {
@@ -451,8 +490,8 @@ func TestEncryptionRequiredIsEnforced(t *testing.T) {
 	})
 	t.Run("share", func(t *testing.T) {
 		p := newEncPair(t, dialect311, cipherAES128GCM)
-		p.c.trees[5] = &treeConn{sh: &share{name: "secret", encrypt: true}}
-		p.c.trees[6] = &treeConn{sh: &share{name: "open"}}
+		p.c.trees[5] = &treeConn{sh: &share{name: "secret", encrypt: true}, session: p.sid}
+		p.c.trees[6] = &treeConn{sh: &share{name: "open"}, session: p.sid}
 		query := func(tree uint32) []byte {
 			m := requestOf(cmdFlush, make([]byte, 24))
 			binary.LittleEndian.PutUint64(m[offSessionID:], p.sid)
@@ -483,6 +522,82 @@ func TestEncryptionRequiredIsEnforced(t *testing.T) {
 			t.Errorf("an encrypted request on an encrypting share: %v, %#x", err, statusOf(t, plain))
 		}
 	})
+}
+
+// The independent review's repro, ported: an unencrypted request with SessionId
+// 0 and the TreeId of a share that requires encryption was executed and answered
+// in the clear, because the rule was only applied to a request that named a
+// session. It must not be carried out at all.
+func TestSessionlessBypassOfRequireEncryption(t *testing.T) {
+	p := newEncPair(t, dialect311, cipherAES128GCM)
+	p.c.trees[5] = &treeConn{sh: &share{name: "secret", encrypt: true}, session: 0}
+	for _, sid := range []uint64{0, 99} {
+		m := requestOf(cmdFlush, make([]byte, 24))
+		binary.LittleEndian.PutUint64(m[offSessionID:], sid)
+		binary.LittleEndian.PutUint32(m[offTreeID:], 5)
+		out, err := p.c.dispatchChain(m)
+		if err != nil {
+			t.Fatalf("err %v", err)
+		}
+		if [4]byte(out[:4]) != protocolID {
+			continue // answered encrypted: nothing was disclosed
+		}
+		if st := statusOf(t, out); st != statusUserSessionDeleted && st != statusAccessDenied {
+			t.Errorf("BYPASS: a plain request with session %d on an encrypting share was carried out, status %#x", sid, st)
+		}
+	}
+}
+
+// A tree id from another session is not a way round the share's rule either:
+// session 8 does not require encryption, but the tree is session 7's.
+func TestAnotherSessionsTreeIsNotAWayRound(t *testing.T) {
+	p := newEncPair(t, dialect311, cipherAES128GCM)
+	p.c.sessions[8] = &session{user: "bob", signingKey: bytes.Repeat([]byte{8}, 16)}
+	p.c.trees[5] = &treeConn{sh: &share{name: "secret", encrypt: true}, session: p.sid}
+	m := requestOf(cmdCreate, make([]byte, 56))
+	binary.LittleEndian.PutUint64(m[offSessionID:], 8)
+	binary.LittleEndian.PutUint32(m[offTreeID:], 5)
+	out, err := p.c.dispatchChain(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := statusOf(t, out); st != statusNetworkNameDeleted {
+		t.Errorf("session 8 using session 7's encrypting tree: %#x, want NETWORK_NAME_DELETED", st)
+	}
+}
+
+// An answer sent later to an encrypted request is encrypted under the session
+// that asked, and dropped when that session is gone.
+func TestAnEncryptedAnswerSentLater(t *testing.T) {
+	srv, cli := net.Pipe()
+	defer srv.Close()
+	defer cli.Close()
+	p := newEncPair(t, dialect311, cipherAES128GCM)
+	p.c.nc = srv
+	p.c.sessions[9] = &session{user: "bob", signingKey: bytes.Repeat([]byte{9}, 16)} // asked last, plain
+	op := &pendingOp{session: p.sid, asyncID: 3, encrypted: true, cancel: make(chan struct{})}
+	p.c.waiting[3] = op
+	reply := asyncResponse(header{command: cmdChangeNotify, messageID: 1}, statusSuccess, 3, 9)
+	go p.c.finishAsync(op, reply)
+	cli.SetReadDeadline(time.Now().Add(time.Second))
+	frame, err := readFrame(cli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if [4]byte(frame[:4]) != transformProtocolID {
+		t.Fatal("the answer to an encrypted request went out in the clear")
+	}
+	if plain, err := p.client.open(frame); err != nil || statusOf(t, plain) != statusSuccess {
+		t.Errorf("the client cannot open it: %v", err)
+	}
+	// The session is gone: nothing at all, in particular nothing in the clear.
+	gone := &pendingOp{session: 55, asyncID: 4, encrypted: true, cancel: make(chan struct{})}
+	p.c.waiting[4] = gone
+	go p.c.finishAsync(gone, asyncResponse(header{command: cmdChangeNotify, messageID: 2}, statusSuccess, 4, 9))
+	cli.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if b, err := readFrame(cli); err == nil {
+		t.Errorf("an answer for a session that is gone was sent: %x", b[:min(len(b), 8)])
+	}
 }
 
 // A LOGOFF inside an encrypted frame is answered encrypted although the session

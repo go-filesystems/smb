@@ -3,6 +3,7 @@ package smb
 import (
 	"bytes"
 	"crypto/aes"
+	"crypto/cipher"
 	"crypto/sha512"
 	"encoding/binary"
 	"encoding/hex"
@@ -183,7 +184,9 @@ func TestNegotiateContextRules(t *testing.T) {
 		{"a signing count the data cannot hold", []outContext{good, {ctxSigning, []byte{5, 0, 1, 0}}}, statusInvalidParameter},
 		{"a signing context shorter than its structure", []outContext{good, {ctxSigning, []byte{1}}}, statusInvalidParameter},
 		{"no hash in common", []outContext{ctxPreauth([]uint16{0x0002}, nil)}, statusNoPreauthHashOverlap},
-		{"an empty hash list", []outContext{ctxPreauth(nil, nil)}, statusNoPreauthHashOverlap},
+		// HashAlgorithmCount MUST be greater than zero (2.2.3.1.1): an empty list is
+		// malformed, which is not a list that names nothing this server speaks.
+		{"an empty hash list", []outContext{ctxPreauth(nil, nil)}, statusInvalidParameter},
 		{"unknown contexts are ignored", []outContext{good, {0x7777, []byte{1, 2, 3}}}, statusSuccess},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -348,33 +351,76 @@ func gfMul(x, y [16]byte) [16]byte {
 	return z
 }
 
-func gmacRef(key, iv, aad []byte) []byte {
+// gcmRef is AES-GCM with a 96-bit IV, written out from SP 800-38D: CTR from
+// inc32(J0) for the ciphertext, GHASH over the padded AAD and ciphertext and
+// their lengths, the tag E(J0) xor GHASH. GMAC is the case of no plaintext.
+func gcmRef(key, iv, aad, pt []byte) (ct, tag []byte) {
 	blk, _ := aes.NewCipher(key)
 	var h [16]byte
 	blk.Encrypt(h[:], make([]byte, 16))
-	var y [16]byte
-	absorb := func(b [16]byte) {
-		for i := range y {
-			y[i] ^= b[i]
+	j0 := append(append([]byte(nil), iv...), 0, 0, 0, 1)
+	ct = make([]byte, len(pt))
+	ctr := append([]byte(nil), j0...)
+	for i := 0; i < len(pt); i += 16 {
+		binary.BigEndian.PutUint32(ctr[12:], binary.BigEndian.Uint32(ctr[12:])+1)
+		var ks [16]byte
+		blk.Encrypt(ks[:], ctr)
+		for j := 0; j < 16 && i+j < len(pt); j++ {
+			ct[i+j] = pt[i+j] ^ ks[j]
 		}
-		y = gfMul(y, h)
 	}
-	for i := 0; i < len(aad); i += 16 {
-		var b [16]byte
-		copy(b[:], aad[i:min(i+16, len(aad))])
-		absorb(b)
+	var y [16]byte
+	absorb := func(data []byte) {
+		for i := 0; i < len(data); i += 16 {
+			var b [16]byte
+			copy(b[:], data[i:min(i+16, len(data))])
+			for j := range y {
+				y[j] ^= b[j]
+			}
+			y = gfMul(y, h)
+		}
 	}
+	absorb(aad)
+	absorb(ct)
 	var lens [16]byte
 	binary.BigEndian.PutUint64(lens[0:], uint64(len(aad))*8)
-	absorb(lens) // 64 bits of AAD length, 64 bits of (zero) ciphertext length
-	j0 := append(append([]byte(nil), iv...), 0, 0, 0, 1)
+	binary.BigEndian.PutUint64(lens[8:], uint64(len(ct))*8)
+	absorb(lens[:])
 	var ek [16]byte
 	blk.Encrypt(ek[:], j0)
-	out := make([]byte, 16)
-	for i := range out {
-		out[i] = ek[i] ^ y[i]
+	tag = make([]byte, 16)
+	for i := range tag {
+		tag[i] = ek[i] ^ y[i]
 	}
-	return out
+	return ct, tag
+}
+
+func gmacRef(key, iv, aad []byte) []byte {
+	_, tag := gcmRef(key, iv, aad, nil)
+	return tag
+}
+
+// McGrew & Viega, "The Galois/Counter Mode of Operation (GCM)", test case 4: a
+// key, a 96-bit IV, 60 bytes of plaintext AND 20 bytes of additional data -- so
+// the GHASH multiplication is checked against a published value, which the
+// empty-AAD case 1 never reaches.
+func TestGCMReferenceAgainstPublishedCase4(t *testing.T) {
+	key := unhex(t, "feffe9928665731c6d6a8f9467308308")
+	iv := unhex(t, "cafebabefacedbaddecaf888")
+	pt := unhex(t, "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39")
+	aad := unhex(t, "feedfacedeadbeeffeedfacedeadbeefabaddad2")
+	wantCT := unhex(t, "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091")
+	wantTag := unhex(t, "5bc94fbc3221a5db94fae95ae7121a47")
+	ct, tag := gcmRef(key, iv, aad, pt)
+	if !bytes.Equal(ct, wantCT) || !bytes.Equal(tag, wantTag) {
+		t.Fatalf("the reference disagrees with the published case:\nct  %x\ntag %x", ct, tag)
+	}
+	// The same case through crypto/cipher, which is what the server runs.
+	blk, _ := aes.NewCipher(key)
+	g, _ := cipher.NewGCM(blk)
+	if got := g.Seal(nil, iv, pt, aad); !bytes.Equal(got, append(append([]byte(nil), wantCT...), wantTag...)) {
+		t.Errorf("crypto/cipher: %x", got)
+	}
 }
 
 func TestGMACAgainstTheDefinition(t *testing.T) {
