@@ -190,6 +190,15 @@ func preauthContext(hash uint16, salt []byte) outContext {
 	return outContext{ctxPreauthIntegrity, d}
 }
 
+// cipherContext is the SMB2_ENCRYPTION_CAPABILITIES answer: the one cipher
+// chosen, or 0 for "none in common".
+func cipherContext(id uint16) outContext {
+	d := make([]byte, 4)
+	binary.LittleEndian.PutUint16(d[0:], 1)
+	binary.LittleEndian.PutUint16(d[2:], id)
+	return outContext{ctxEncryption, d}
+}
+
 // signingContext is the SMB2_SIGNING_CAPABILITIES answer: the one algorithm
 // chosen.
 func signingContext(alg uint16) outContext {

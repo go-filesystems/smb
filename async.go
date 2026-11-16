@@ -30,6 +30,7 @@ type pendingOp struct {
 	command   command
 	messageID uint64
 	asyncID   uint64
+	encrypted bool     // the request came encrypted, so the answer goes encrypted
 	file      [16]byte // the handle it belongs to, so closing that handle ends it
 	cancel    chan struct{}
 	once      sync.Once
@@ -49,6 +50,7 @@ func (c *conn) beginAsync(h header, file [16]byte) (*pendingOp, []byte) {
 		asyncID:   c.nextAsync,
 		file:      file,
 		cancel:    make(chan struct{}),
+		encrypted: h.encrypted,
 	}
 	c.waiting[op.asyncID] = op
 	c.mu.Unlock()
@@ -65,16 +67,28 @@ func (c *conn) finishAsync(op *pendingOp, reply []byte) {
 	c.mu.Lock()
 	_, live := c.waiting[op.asyncID]
 	delete(c.waiting, op.asyncID)
-	sess := c.sessions[c.asyncSession]
+	sid := c.asyncSession
+	sess := c.sessions[sid]
 	c.mu.Unlock()
 	if !live {
 		// Cancelled, and already answered by whoever cancelled it.
 		return
 	}
-	if sess != nil {
-		signMessage(c.signAlgo(), sess.signingKey, reply)
+	c.send(c.finalReply(op, sess, sid, reply))
+}
+
+// finalReply prepares the answer an operation sends later: encrypted when its
+// request was (the key protects the message, so it is not signed as well), signed
+// otherwise.
+func (c *conn) finalReply(op *pendingOp, sess *session, sid uint64, reply []byte) []byte {
+	if sess == nil {
+		return reply
 	}
-	c.send(reply)
+	if op.encrypted && sess.crypto != nil {
+		return sess.crypto.seal(sid, reply)
+	}
+	signMessage(c.signAlgo(), sess.signingKey, reply)
+	return reply
 }
 
 // asyncResponse builds the header of a reply that carries an AsyncId.
@@ -126,10 +140,7 @@ func (c *conn) cancel(h header) ([]byte, error) {
 	reply := asyncResponse(header{command: found.commandOf(), messageID: found.messageID},
 		statusCancelled, found.asyncID, 9)
 	binary.LittleEndian.PutUint16(reply[headerLen:], 9)
-	if sess != nil {
-		signMessage(c.signAlgo(), sess.signingKey, reply)
-	}
-	return nil, c.send(reply)
+	return nil, c.send(c.finalReply(found, sess, h.sessionID, reply))
 }
 
 // commandOf is what the cancelled operation was. It is kept on the operation

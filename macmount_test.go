@@ -24,8 +24,15 @@ import (
 //
 //	go test -tags macmount -run TestMacMount -v ./...
 //
-// macShareOptions are the options the share is exported with.
-func macShareOptions() []fssmb.ShareOption { return nil }
+// macShareOptions are the options the share is exported with:
+// SMB_ENCRYPT=share makes the share require encryption (RequireEncryption), and
+// SMB_ENCRYPT=server makes the whole server require it (Server.EncryptData).
+func macShareOptions() []fssmb.ShareOption {
+	if os.Getenv("SMB_ENCRYPT") == "share" {
+		return []fssmb.ShareOption{fssmb.RequireEncryption()}
+	}
+	return nil
+}
 
 func TestMacMount(t *testing.T) {
 	if runtime.GOOS != "darwin" {
@@ -41,6 +48,7 @@ func TestMacMount(t *testing.T) {
 	srv := fssmb.New()
 	srv.Logger = slog.New(slog.NewTextHandler(&negotiated, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	srv.AddUser("alice", "hunter2")
+	srv.EncryptData = os.Getenv("SMB_ENCRYPT") == "server"
 	if err := srv.Share("disk", mem, macShareOptions()...); err != nil {
 		t.Fatal(err)
 	}
@@ -73,4 +81,7 @@ func TestMacMount(t *testing.T) {
 		t.Errorf("writing through the mount: %v", err)
 	}
 	t.Logf("macOS negotiated, as the server saw it:\n%s", strings.TrimSpace(negotiated.String()))
+	if os.Getenv("SMB_ENCRYPT") != "" && !strings.Contains(negotiated.String(), "smb first encrypted request") {
+		t.Error("encryption was required, and no request arrived encrypted")
+	}
 }

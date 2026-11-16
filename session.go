@@ -20,6 +20,11 @@ import (
 // hash ([MS-SMB2] 3.3.5.5.3): both requests and the first response, but not the
 // last response, which is signed with the key the hash produces.
 func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
+	// [MS-SMB2] 3.3.5.5 steps 1 and 2, before anything else is read: a server that
+	// requires encryption does not let in a client that cannot do it.
+	if c.srv.EncryptData && !c.encCapable() {
+		return errorResponse(h, statusAccessDenied), nil
+	}
 	if len(body) < 24 {
 		return nil, fmt.Errorf("smb: SESSION_SETUP body of %d bytes is too short", len(body))
 	}
@@ -61,7 +66,7 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 		if wrapped {
 			reply = negTokenRespChallenge(challenge)
 		}
-		resp := c.sessionSetupResponse(h, statusMoreProcessing, reply)
+		resp := c.sessionSetupResponse(h, statusMoreProcessing, 0, reply)
 		if c.dialect == dialect311 {
 			c.pendingPreauth = preauthExtend(c.pendingPreauth, resp)
 		}
@@ -94,11 +99,26 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 			preauth = preauthExtend(c.pendingPreauth, msg)
 			c.pendingPreauth = nil
 		}
-		c.sessions[h.sessionID] = &session{
+		sess := &session{
 			user:       auth.user,
 			sessionKey: key,
 			signingKey: signingKeyFor(c.dialect, key, preauth),
 		}
+		var flags uint16
+		if c.encCapable() {
+			enc, dec, err := c.deriveCipherKeys(key, preauth)
+			if err != nil {
+				return nil, err
+			}
+			sess.crypto = &sessionCrypto{enc: enc, dec: dec, cipher: c.sessionCipher()}
+			// [MS-SMB2] 3.3.5.5.3 step 10: with EncryptData the session says so,
+			// and from then on a request must come encrypted.
+			if c.srv.EncryptData {
+				sess.encryptData = true
+				flags |= sessionFlagEncryptData
+			}
+		}
+		c.sessions[h.sessionID] = sess
 		c.logSession(h.sessionID, auth.user)
 		var done []byte
 		if c.spnego {
@@ -107,7 +127,7 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 		// The last message of the authentication is signed even though the
 		// request was not: it is the first thing a client can check, and it
 		// is what proves the server holds the same key.
-		reply := c.sessionSetupResponse(h, statusSuccess, done)
+		reply := c.sessionSetupResponse(h, statusSuccess, flags, done)
 		signMessage(c.signAlgo(), c.sessions[h.sessionID].signingKey, reply)
 		return reply, nil
 
@@ -125,7 +145,29 @@ func (c *conn) logSession(id uint64, user string) {
 		l = c.srv.Logger
 	}
 	l.Debug("smb session established", "session", id, "user", user,
-		"dialect", dialectName(c.dialect), "signing", c.signAlgo().String())
+		"dialect", dialectName(c.dialect), "signing", c.signAlgo().String(),
+		"cipher", c.sessionCipherName(), "encrypt_data", c.srv.EncryptData && c.encCapable())
+}
+
+// sessionCipherName is the cipher the session's messages would use, or "none"
+// when the connection cannot encrypt.
+func (c *conn) sessionCipherName() string {
+	if !c.encCapable() {
+		return "none"
+	}
+	return cipherName(c.sessionCipher())
+}
+
+// logEncrypted says, once per session and on the same Logger, that a message
+// really did arrive encrypted: "negotiated" is what the client offered, this is
+// what it did.
+func (c *conn) logEncrypted(sid uint64, sess *session) {
+	l := slog.Default()
+	if c.srv != nil && c.srv.Logger != nil {
+		l = c.srv.Logger
+	}
+	l.Debug("smb first encrypted request", "session", sid, "user", sess.user,
+		"cipher", cipherName(sess.crypto.cipher))
 }
 
 // dialectName is "3.1.1" for 0x0311.
@@ -156,12 +198,12 @@ func (a sigAlgo) String() string {
 }
 
 // sessionSetupResponse builds the 8-byte body plus its security buffer.
-func (c *conn) sessionSetupResponse(h header, status uint32, sec []byte) []byte {
+func (c *conn) sessionSetupResponse(h header, status uint32, flags uint16, sec []byte) []byte {
 	const bodyLen = 8 // structure size says 9 for "and a buffer"
 	b := append(responseTo(h, status), make([]byte, bodyLen+len(sec))...)
 	body := b[headerLen:]
 	binary.LittleEndian.PutUint16(body[0:], 9)
-	binary.LittleEndian.PutUint16(body[2:], 0) // session flags: not guest, not null
+	binary.LittleEndian.PutUint16(body[2:], flags) // session flags: not guest, not null
 	binary.LittleEndian.PutUint16(body[4:], headerLen+bodyLen)
 	binary.LittleEndian.PutUint16(body[6:], uint16(len(sec)))
 	copy(body[bodyLen:], sec)

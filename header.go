@@ -116,6 +116,10 @@ type header struct {
 	// asyncID is the same eight bytes as treeID and the four before it: a
 	// header is one shape or the other, and the flags say which.
 	asyncID uint64
+	// encrypted says the request arrived inside a TRANSFORM_HEADER. It is not on
+	// the wire in the header: it is set by the dispatcher, so a command that
+	// answers later knows to encrypt the answer (Request.IsEncrypted).
+	encrypted bool
 }
 
 // parseHeader reads the 64 bytes in front of a message.

@@ -52,8 +52,35 @@
 // CLOSE shut the client's source handle and the rename came back "The handle
 // is invalid".
 //
-// Encryption is not here: no encryption context is answered, so a client sees
-// a server that does not offer it.
+// Encryption is here, for 3.0, 3.0.2 and 3.1.1 ([MS-SMB2] 2.2.41, 3.1.4.3,
+// 3.3.4.1.4, 3.3.5.2.1.1, 3.3.5.2.9, 3.3.5.2.11, 3.3.5.5.3). 3.0 and 3.0.2 use
+// AES-128-CCM, announced by the encryption capability bit; 3.1.1 negotiates one
+// of AES-128-GCM, AES-128-CCM, AES-256-GCM and AES-256-CCM in an ENCRYPTION
+// context, preferring them in that order. Each session derives a key per
+// direction from its session key, a frame that begins with a TRANSFORM_HEADER is
+// decrypted before it is read, and the reply is encrypted as one unit when the
+// request was or when the session or the share requires it. A frame that cannot
+// be decrypted, or that names another session than the one it was encrypted
+// for, ends the connection. Compression, which can nest inside an encrypted
+// message, is not negotiated, so a decrypted message that is not a plain SMB2
+// message ends the connection too.
+//
+// Offering encryption changes nothing for a client that does not ask for it.
+// Requiring it is two options: [RequireEncryption] on one share (TREE_CONNECT
+// answers SMB2_SHAREFLAG_ENCRYPT_DATA, a request on the share that arrives in
+// the clear is refused with STATUS_ACCESS_DENIED, and a client that cannot
+// encrypt is refused at TREE_CONNECT), and [Server.EncryptData] for every session
+// (SMB2_SESSION_FLAG_ENCRYPT_DATA; a client that cannot encrypt is refused at
+// SESSION_SETUP). [Server.DisableEncryption] stops the server offering it.
+//
+// A session logs what it negotiated at Debug level on Server.Logger: the
+// dialect, the signing algorithm and the cipher; and, once per session, that a
+// request really did arrive encrypted.
+//
+// Not implemented: the rule that a 3.1.1 TREE_CONNECT neither signed nor
+// encrypted ends the connection (3.3.5.7), and encrypted reads run one at a time
+// rather than beside others, because only a plaintext frame is classified for
+// that (see inflight.go).
 //
 // Byte-range locks are here, and enforced: a read crosses a shared lock and
 // stops at an exclusive one, a write stops at either, and a handle never
