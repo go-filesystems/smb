@@ -393,6 +393,10 @@ type conn struct {
 	// FSCTL_VALIDATE_NEGOTIATE_INFO to compare against.
 	clientDialects []uint16
 	clientGuid     [16]byte
+	// seq is the command sequence window. It is nil until serve starts it, so a
+	// test that drives dispatchChain by hand, with every request numbered 0, is not
+	// refused for replaying itself; a window is tested on its own.
+	seq *seqWindow
 	// signingAlgorithm is the id negotiated by SMB2_SIGNING_CAPABILITIES
 	// (AES-CMAC when none was); see sigAlgoFor.
 	signingAlgorithm uint16
@@ -455,6 +459,7 @@ type session struct {
 
 func (c *conn) serve() {
 	defer c.nc.Close()
+	c.seq = newSeqWindow()
 	// Registered first, so it runs last: nothing is in flight that could still
 	// use the keys. (Sessions still open when the connection drops were never
 	// logged off.)
@@ -559,7 +564,14 @@ func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 	// client never sends the greeting, so the tests stay green while every
 	// mount from macOS dies at the first frame, silently.
 	if len(msg) >= 4 && [4]byte(msg[:4]) == smb1ProtocolID {
-		return c.legacyNegotiateResponse()
+		// [MS-SMB2] 3.3.5.2.3: the server "MUST assume that MessageId is zero" for
+		// the SMB1 negotiate, so it uses up id 0 like any other request.
+		if c.seq != nil && !c.seq.take(0, 1) {
+			return nil, errSequence
+		}
+		resp, err := c.legacyNegotiateResponse()
+		c.noteReply(resp)
+		return resp, err
 	}
 	encrypted, tsid := false, uint64(0)
 	if len(msg) >= 4 && [4]byte(msg[:4]) == transformProtocolID {
@@ -576,6 +588,9 @@ func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 		seal = sealing{tsid, c.sessions[tsid].crypto}
 	}
 	out, err := c.chain(msg, encrypted, tsid, &seal)
+	if err == nil {
+		c.noteReply(out) // the credits it carries are ids the client may now use
+	}
 	if err != nil || out == nil || seal.crypto == nil {
 		return out, err
 	}
@@ -643,6 +658,23 @@ func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]
 			} else if !haveFirst {
 				return nil, errTransform
 			}
+		}
+		// [MS-SMB2] 3.3.5.2.3: the MessageId (and the CreditCharge ids after it) must
+		// be in the window, and is used up. CANCEL skips this: it names the request
+		// it cancels and consumes no id of its own (3.3.1.1). Each operation of a
+		// compound has an id of its own and uses it up here, even one that is then
+		// skipped for the failure before it.
+		credited := uint16(0)
+		if c.seq != nil && h.command != cmdCancel {
+			if !c.seq.take(h.messageID, uint32(h.creditCharge)) {
+				return nil, errSequence
+			}
+			// How many credits the reply grants is the server's to decide
+			// ([MS-SMB2] 3.3.1.2): what the client asked for, but never so many
+			// that it holds more than the connection is allowed (see creditCap).
+			// Every reply built from this header, including a refusal, carries it.
+			credited = c.seq.allow(creditsFor(h), c.creditCap())
+			h.credits = credited
 		}
 		// The related-operations flag means this request speaks about what the
 		// first one opened: it carries no session or tree of its own.
@@ -729,7 +761,7 @@ func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]
 			*seal = sealing{binary.LittleEndian.Uint64(one[offSessionID:]), sess.crypto}
 		}
 
-		reply, err := c.dispatchEnc(one, encrypted)
+		reply, err := c.dispatchEnc(one, encrypted, credited)
 		if err != nil {
 			return nil, err
 		}
@@ -822,12 +854,16 @@ func (c *conn) encryptionRequired(cmd command, sess *session, tree *treeConn) bo
 // dispatch answers one message. An error stops the connection; a nil response
 // means there is nothing to send back.
 func (c *conn) dispatch(msg []byte) ([]byte, error) {
-	return c.dispatchEnc(msg, false)
+	return c.dispatchEnc(msg, false, 0)
 }
 
 // dispatchEnc is dispatch for a message that did, or did not, arrive encrypted:
 // an operation that answers later must answer encrypted too.
-func (c *conn) dispatchEnc(msg []byte, encrypted bool) ([]byte, error) {
+//
+// credits, when not zero, is how many credits the reply grants: it is set on the
+// parsed header and not written into the message, because the message is what a
+// signature and the pre-authentication hash were computed over.
+func (c *conn) dispatchEnc(msg []byte, encrypted bool, credits uint16) ([]byte, error) {
 	// The legacy greeting is the one SMB1 message this server reads, and the
 	// only answer it gives is an SMB2 negotiate response naming the wildcard
 	// dialect: "ask me again in SMB2".
@@ -839,6 +875,9 @@ func (c *conn) dispatchEnc(msg []byte, encrypted bool) ([]byte, error) {
 		return nil, err
 	}
 	h.encrypted = encrypted
+	if credits != 0 {
+		h.credits = credits
+	}
 	body := msg[headerLen:]
 	if c.dialect != 0 && h.command != cmdNegotiate && creditChargeTooLow(h, body) {
 		return errorResponse(h, statusInvalidParameter), nil
