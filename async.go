@@ -82,6 +82,7 @@ func (c *conn) finishAsync(op *pendingOp, reply []byte) {
 		// request was encrypted, encrypted: it is dropped, never sent as it is.
 		return
 	}
+	c.noteReply(reply)
 	c.send(c.finalReply(op, sess, op.session, reply))
 }
 
@@ -148,6 +149,7 @@ func (c *conn) cancel(h header) ([]byte, error) {
 	reply := asyncResponse(header{command: found.commandOf(), messageID: found.messageID},
 		statusCancelled, found.asyncID, 9)
 	binary.LittleEndian.PutUint16(reply[headerLen:], 9)
+	c.noteReply(reply)
 	return nil, c.send(c.finalReply(found, sess, h.sessionID, reply))
 }
 

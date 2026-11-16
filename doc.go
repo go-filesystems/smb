@@ -65,6 +65,12 @@
 // message, is not negotiated, so a decrypted message that is not a plain SMB2
 // message ends the connection too.
 //
+// A signature or an authentication tag proves who made a message, not that it is
+// new, so the server also keeps the command sequence window of [MS-SMB2] 3.3.1.1
+// and 3.3.5.2.3: the MessageIds it will accept, { 0 } at the start and extended by
+// the credits its replies carry. Each id is accepted once; a request outside the
+// window -- a replayed one, or one nobody was granted -- ends the connection.
+//
 // Offering encryption changes nothing for a client that does not ask for it.
 // Requiring it is two options: [RequireEncryption] on one share (TREE_CONNECT
 // answers SMB2_SHAREFLAG_ENCRYPT_DATA, a request on the share that arrives in
