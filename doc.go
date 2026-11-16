@@ -23,14 +23,24 @@
 //
 // # What is implemented
 //
-// Dialects 2.1, 3.0 and 3.0.2; NTLMv2 authentication over SPNEGO or raw, as
-// the client prefers; signing, with HMAC-SHA256 or AES-CMAC as the dialect
-// requires; and the file operations a file manager performs: opening,
-// reading, writing, listing, renaming, truncating and deleting.
+// Dialects 2.1, 3.0, 3.0.2 and 3.1.1; NTLMv2 authentication over SPNEGO or
+// raw, as the client prefers; signing, with HMAC-SHA256, AES-CMAC or (on 3.1.1,
+// when the client offers it) AES-GMAC as the dialect requires; and the file
+// operations a file manager performs: opening, reading, writing, listing,
+// renaming, truncating and deleting.
+//
+// 3.1.1 is the whole of what [MS-SMB2] 3.3.5.4 and 3.3.5.5.3 ask of a server
+// that is not encrypting: the negotiate contexts it reads (preauthentication
+// integrity with SHA-512, signing capabilities; contexts of any other type are
+// ignored), the pre-authentication integrity hash chained over NEGOTIATE and
+// SESSION_SETUP, and the signing key derived from that hash with the SP800-108
+// counter-mode KDF (label "SMBSigningKey"). FSCTL_VALIDATE_NEGOTIATE_INFO on a
+// 3.1.1 connection ends it, as 3.3.5.15.12 says.
 //
 // That is enough for `mount -t cifs` on Linux -- with no vers= at all -- and
-// for mount_smbfs on macOS, which settles on 3.0.2 signed, and for the Windows
-// redirector, which reports 3.0.2 with Signed True.
+// for mount_smbfs on macOS, which settles on 3.1.1 signed with AES-GMAC; the
+// Windows redirector was last measured, before 3.1.1, at 3.0.2 with Signed
+// True. A session reports what it negotiated at Debug level on Server.Logger.
 //
 // Several requests can arrive in ONE message, and the ones after the first may
 // say they are RELATED: they carry no session or tree of their own, and an
@@ -42,9 +52,8 @@
 // CLOSE shut the client's source handle and the rename came back "The handle
 // is invalid".
 //
-// 3.1.1 is not here. It adds pre-authentication integrity and negotiate
-// contexts, which change the shape of the exchange itself; naming it without
-// them would promise what is not there. Nor is encryption.
+// Encryption is not here: no encryption context is answered, so a client sees
+// a server that does not offer it.
 //
 // Byte-range locks are here, and enforced: a read crosses a shared lock and
 // stops at an exclusive one, a write stops at either, and a handle never

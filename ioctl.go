@@ -4,8 +4,17 @@ package smb
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"slices"
 )
+
+var errValidateOn311 = errors.New("smb: FSCTL_VALIDATE_NEGOTIATE_INFO on a 3.1.1 connection")
+
+// errValidateMismatch ends a connection whose client remembers a different
+// NEGOTIATE than the one this server answered: a man in the middle, or a bug
+// worth the same refusal.
+var errValidateMismatch = errors.New("smb: FSCTL_VALIDATE_NEGOTIATE_INFO does not match the negotiate")
 
 // The control codes this server answers. Everything else is refused by name.
 const (
@@ -34,21 +43,37 @@ func (c *conn) ioctl(h header, body []byte, msg []byte) ([]byte, error) {
 	inLen := int(binary.LittleEndian.Uint32(body[28:]))
 	switch code {
 	case fsctlValidateNegotiateInfo:
+		// [MS-SMB2] 3.3.5.15.12: on 3.1.1 the pre-authentication hash has
+		// already done this job, and a client that asks anyway is not following
+		// the dialect it negotiated: the connection is terminated.
+		if c.dialect == dialect311 {
+			return nil, errValidateOn311
+		}
 		if inOff < 0 || inLen < 24 || inOff+inLen > len(msg) {
 			return errorResponse(h, statusInvalidParameter), nil
 		}
 		in := msg[inOff : inOff+inLen]
-		count := int(binary.LittleEndian.Uint16(body[0:]))
-		_ = count
-		// What the client says it sent. A mismatch means the negotiate it
-		// remembers is not the one that happened.
-		theirCaps := binary.LittleEndian.Uint32(in[0:])
-		theirMode := binary.LittleEndian.Uint16(in[20:])
-		if theirCaps != c.clientCapabilities || theirMode != c.clientSecurityMode {
-			// ACCESS_DENIED rather than a polite refusal: the client is asking
-			// whether it was tampered with, and the honest answer is that what
-			// it remembers is not what arrived.
-			return errorResponse(h, statusAccessDenied), nil
+		dialects := int(binary.LittleEndian.Uint16(in[22:]))
+		if 24+2*dialects > len(in) {
+			return errorResponse(h, statusInvalidParameter), nil
+		}
+		// [MS-SMB2] 3.3.5.15.12: the response must fit in what the client will
+		// accept, and anything the client remembers differently from what this
+		// connection negotiated -- the dialects it offered, its GUID, its security
+		// mode, its capabilities, or the dialect the server would pick from the list
+		// it remembers -- means the exchange was tampered with: the connection is
+		// terminated, with no answer for the tamperer to relay.
+		if int(binary.LittleEndian.Uint32(body[44:])) < 24 {
+			return nil, errValidateMismatch
+		}
+		theirDialects := readU16s(in[24:], dialects)
+		if !slices.Equal(theirDialects, c.clientDialects) || chooseDialect(theirDialects) != c.dialect {
+			return nil, errValidateMismatch
+		}
+		if [16]byte(in[4:20]) != c.clientGuid ||
+			binary.LittleEndian.Uint16(in[20:]) != c.clientSecurityMode ||
+			binary.LittleEndian.Uint32(in[0:]) != c.clientCapabilities {
+			return nil, errValidateMismatch
 		}
 		out := make([]byte, 24)
 		binary.LittleEndian.PutUint32(out[0:], capabilitiesFor(c.dialect)) // as NEGOTIATE said

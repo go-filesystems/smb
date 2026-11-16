@@ -363,12 +363,25 @@ type conn struct {
 	dialect            uint16
 	clientSecurityMode uint16
 	clientCapabilities uint32
-	nextID             uint64
-	sessions           map[uint64]*session
-	trees              map[uint32]*treeConn
-	nextTree           uint32
-	pending            *challenge // the NTLM challenge sent, awaiting its answer
-	spnego             bool       // whether this client wraps its tokens, or sends them bare
+	// clientDialects and clientGuid are what the client's NEGOTIATE said, kept for
+	// FSCTL_VALIDATE_NEGOTIATE_INFO to compare against.
+	clientDialects []uint16
+	clientGuid     [16]byte
+	// signingAlgorithm is the id negotiated by SMB2_SIGNING_CAPABILITIES
+	// (AES-CMAC when none was); see sigAlgoFor.
+	signingAlgorithm uint16
+	// preauth is the pre-authentication integrity hash after NEGOTIATE (3.1.1
+	// only); pendingPreauth continues it through the SESSION_SETUP exchange in
+	// progress. See preauth.go.
+	preauth        []byte
+	pendingPreauth []byte
+	pendingSID     uint64 // the session id allocated to the challenge in progress
+	nextID         uint64
+	sessions       map[uint64]*session
+	trees          map[uint32]*treeConn
+	nextTree       uint32
+	pending        *challenge // the NTLM challenge sent, awaiting its answer
+	spnego         bool       // whether this client wraps its tokens, or sends them bare
 
 	panicked any // what a connection died of, for a test to insist on
 	files    map[[16]byte]*openFile
@@ -383,11 +396,10 @@ type conn struct {
 	// (see async.go), so writes are serialised and the state the two share is
 	// locked. Before that the loop read one message, answered it and read the
 	// next: everything was serial by construction, and none of this existed.
-	wmu          sync.Mutex // one writer at a time
-	mu           sync.Mutex // guards waiting and nextAsync
-	waiting      map[uint64]*pendingOp
-	nextAsync    uint64
-	asyncSession uint64 // whose key signs a reply sent from elsewhere
+	wmu       sync.Mutex // one writer at a time
+	mu        sync.Mutex // guards waiting and nextAsync
+	waiting   map[uint64]*pendingOp
+	nextAsync uint64
 }
 
 func newConn(s *Server, nc net.Conn) *conn {
@@ -410,6 +422,16 @@ type session struct {
 
 func (c *conn) serve() {
 	defer c.nc.Close()
+	// Registered first, so it runs last: nothing is in flight that could still
+	// use the keys. (Sessions still open when the connection drops were never
+	// logged off.)
+	defer func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		for _, s := range c.sessions {
+			s.wipe()
+		}
+	}()
 	// One connection's crash must not be every connection's. A panic here is
 	// a defect and will be fixed, but a server that dies of one takes every
 	// other client's mount with it -- and the driver underneath is parsing an
@@ -553,7 +575,7 @@ func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 			reply := errorResponse(h, prevStatus)
 			if h.flags&flagSigned != 0 {
 				if sess := c.sessions[binary.LittleEndian.Uint64(one[offSessionID:])]; sess != nil {
-					signMessage(c.dialect, sess.signingKey, reply)
+					signMessage(c.signAlgo(), sess.signingKey, reply)
 				}
 			}
 			if prevAt >= 0 {
@@ -577,8 +599,15 @@ func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 		// does not check out is not a request from the party that
 		// authenticated, whatever it says in its header.
 		sess := c.sessions[binary.LittleEndian.Uint64(one[offSessionID:])]
+		// [MS-SMB2] 3.3.5.2.9: every command but the ones that come before there is
+		// a session names an authenticated session. Without this a request that
+		// carries SessionId 0 and a tree id would reach the handlers with no
+		// session to hold it to anything: not its signature, not its encryption.
+		if sess == nil && commandNeedsSession(h.command) {
+			return c.finish(out, prevAt, errorResponse(h, statusUserSessionDeleted), nil, h), nil
+		}
 		if h.flags&flagSigned != 0 {
-			if sess == nil || !verifyMessage(c.dialect, sess.signingKey, one) {
+			if sess == nil || !verifyMessage(c.signAlgo(), sess.signingKey, one) {
 				return c.finish(out, prevAt, errorResponse(h, statusAccessDenied), sess, h), nil
 			}
 		}
@@ -590,7 +619,10 @@ func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 		// Signed in kind: a client that signed its request checks the reply,
 		// and one that did not would reject a signature it cannot verify.
 		if reply != nil && h.flags&flagSigned != 0 && sess != nil {
-			signMessage(c.dialect, sess.signingKey, reply)
+			signMessage(c.signAlgo(), sess.signingKey, reply)
+		}
+		if h.command == cmdLogoff && sess != nil {
+			sess.wipe() // the reply above was the last thing the keys were for
 		}
 		if reply != nil {
 			if len(reply) >= headerLen {
@@ -614,12 +646,23 @@ func (c *conn) dispatchChain(msg []byte) ([]byte, error) {
 	}
 }
 
+// commandNeedsSession is false for the commands that are legitimate with no
+// session: NEGOTIATE and SESSION_SETUP come before one exists, ECHO is a
+// keep-alive, and CANCEL only names an operation of this connection.
+func commandNeedsSession(cmd command) bool {
+	switch cmd {
+	case cmdNegotiate, cmdSessionSetup, cmdEcho, cmdCancel:
+		return false
+	}
+	return true
+}
+
 // finish appends one last reply to a chain and returns what to send. The
 // refusal path uses it so a rejected signature still answers in the shape the
 // client is reading.
 func (c *conn) finish(out []byte, prevAt int, reply []byte, sess *session, h header) []byte {
 	if sess != nil && h.flags&flagSigned != 0 {
-		signMessage(c.dialect, sess.signingKey, reply)
+		signMessage(c.signAlgo(), sess.signingKey, reply)
 	}
 	if prevAt >= 0 {
 		binary.LittleEndian.PutUint32(out[prevAt+offNextCommand:], uint32(len(out)-prevAt))
@@ -657,16 +700,18 @@ func (c *conn) dispatch(msg []byte) ([]byte, error) {
 	}
 	switch h.command {
 	case cmdNegotiate:
-		return c.negotiate(h, body)
+		return c.negotiate(h, body, msg)
 	case cmdSessionSetup:
-		return c.sessionSetup(h, body)
+		return c.sessionSetup(h, body, msg)
 	case cmdLogoff:
-		delete(c.sessions, h.sessionID)
-		return simpleResponse(h, statusSuccess, 4), nil
+		return c.logoff(h), nil
 	case cmdTreeConnect:
 		return c.treeConnect(h, body, msg)
 	case cmdTreeDisconnect:
-		delete(c.trees, h.treeID)
+		// Only the session's own tree: another session's id is not ours to drop.
+		if c.tree(h) != nil {
+			delete(c.trees, h.treeID)
+		}
 		return simpleResponse(h, statusSuccess, 4), nil
 	case cmdEcho:
 		return simpleResponse(h, statusSuccess, 4), nil

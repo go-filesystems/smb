@@ -5,6 +5,7 @@ package smb_test
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -64,6 +65,9 @@ func TestLiveMount(t *testing.T) {
 	}}
 
 	srv := fssmb.New()
+	// What the kernel NEGOTIATED is read from the server's side, below.
+	var negotiated lockedBuffer
+	srv.Logger = slog.New(slog.NewTextHandler(&negotiated, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	srv.AddUser("alice", "hunter2")
 	if err := srv.Share("disk", timed); err != nil {
 		t.Fatal(err)
@@ -89,6 +93,7 @@ func TestLiveMount(t *testing.T) {
 	base := fmt.Sprintf("port=%d,username=alice,password=hunter2,uid=%d,gid=%d",
 		port, os.Getuid(), os.Getgid())
 	out, err := run("mount", "-t", "cifs", "//127.0.0.1/disk", mnt, "-o", base)
+	fellBack := err != nil
 	if err != nil {
 		t.Logf("mounting without naming a dialect failed, trying 3.0: %v\n%s", err, out)
 		if out, err = run("mount", "-t", "cifs", "//127.0.0.1/disk", mnt, "-o", base+",vers=3.0"); err != nil {
@@ -97,6 +102,13 @@ func TestLiveMount(t *testing.T) {
 	}
 	if out, err := run("sh", "-c", "mount | grep cifs"); err == nil {
 		t.Logf("mounted: %s", strings.TrimSpace(out))
+	}
+	// The kernel offers 3.1.1 when no vers= is given, and this server speaks it:
+	// the session must say so. A mount that only worked after the fallback to
+	// 3.0 above would be a regression in the very dialect this checks.
+	t.Logf("the server logged: %s", strings.TrimSpace(negotiated.String()))
+	if !strings.Contains(negotiated.String(), "dialect=3.1.1") && !fellBack {
+		t.Errorf("the kernel mounted without naming a dialect, but not on 3.1.1: %s", negotiated.String())
 	}
 	defer run("umount", mnt)
 
