@@ -135,6 +135,31 @@ func TestPendingExchangesAreBounded(t *testing.T) {
 	}
 }
 
+// Every refusal of the last leg ends the exchange, not only a wrong password: an
+// unknown user and a token that does not parse leave nothing behind either.
+func TestEveryRefusalOfTheLastLegEndsTheExchange(t *testing.T) {
+	garbage := append(append([]byte(nil), ntlmSignature[:]...), 3, 0, 0, 0, 1, 2, 3) // type 3, cut short
+	for name, token := range map[string]func(ch *challenge) []byte{
+		"an unknown user":      func(ch *challenge) []byte { return ntlmType3(ch, "nobody", "x") },
+		"a wrong password":     func(ch *challenge) []byte { return ntlmType3(ch, "alice", "wrong") },
+		"an unparseable token": func(*challenge) []byte { return garbage },
+	} {
+		s := &setupper{t: t, c: exchangeConn(t, dialect302)}
+		id := s.leg1(0)
+		r := &requester{c: s.c, next: s.next}
+		out, err := s.c.dispatchChain(r.setup(id, token(s.c.exchanges[id].challenge), false))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if st := statusOf(t, out); st != statusLogonFailure {
+			t.Errorf("%s: answered %#x, want LOGON_FAILURE", name, st)
+		}
+		if len(s.c.exchanges) != 0 || len(s.c.exchangeOrder) != 0 {
+			t.Errorf("%s: the exchange was left in place", name)
+		}
+	}
+}
+
 // A refused login ends its exchange, and a second leg with no exchange behind it
 // is refused rather than answered from some other state.
 func TestAFailedLoginEndsItsExchange(t *testing.T) {

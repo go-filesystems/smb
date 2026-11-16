@@ -88,6 +88,12 @@ type Server struct {
 	// MaxConnections is how many connections the server holds at once; zero means
 	// [DefaultMaxConnections] and a negative value no limit. A connection over the
 	// limit is closed as it is accepted. Set it before the first connection.
+	//
+	// Every connection is a file descriptor, and so is every file a driver opens:
+	// where the process's soft descriptor limit (RLIMIT_NOFILE) is below the
+	// default, the default is three quarters of it (192 on macOS, whose limit is
+	// 256) so that EMFILE is not what reaches first; raise the limit and set this
+	// to use more.
 	MaxConnections int
 	// MaxPreAuthConnections is how many connections may have no authenticated
 	// session; zero means [DefaultMaxPreAuthConnections], a negative value no
@@ -99,6 +105,12 @@ type Server struct {
 	// it is closed; zero means [DefaultPreAuthTimeout], a negative value never.
 	// Set it before the first connection.
 	PreAuthTimeout time.Duration
+	// IdleTimeout is how long an authenticated connection with no open handle and
+	// no operation pending may go without a request before it is closed; zero
+	// means [DefaultIdleTimeout], a negative value never. A connection whose last
+	// session logs off counts as unauthenticated again. Set it before the first
+	// connection.
+	IdleTimeout time.Duration
 
 	// preAuth counts the connections with no authenticated session; dropped is how
 	// many the limits have refused, and dropping is whether the log has already
@@ -106,6 +118,7 @@ type Server struct {
 	preAuth  int
 	dropped  int
 	dropping bool
+	closing  chan struct{} // closed by Close
 }
 
 type share struct {
@@ -208,10 +221,11 @@ func WithCapacityFunc(f func() (total, avail uint64)) ShareOption {
 // asked to mount without credentials is told so rather than let in.
 func New() *Server {
 	s := &Server{
-		shares: map[string]*share{},
-		users:  map[string]credential{},
-		name:   "GOFS",
-		conns:  map[*conn]struct{}{},
+		shares:  map[string]*share{},
+		users:   map[string]credential{},
+		name:    "GOFS",
+		conns:   map[*conn]struct{}{},
+		closing: make(chan struct{}),
 	}
 	// One identity for the life of the server: a client that validates the
 	// negotiate exchange compares this against what it was told, and a fresh
@@ -354,6 +368,7 @@ func (s *Server) Serve(ln net.Listener) error {
 	}
 	s.lns = append(s.lns, ln)
 	s.mu.Unlock()
+	var backoff time.Duration
 	for {
 		nc, err := ln.Accept()
 		if err != nil {
@@ -363,8 +378,27 @@ func (s *Server) Serve(ln net.Listener) error {
 			if closed {
 				return nil
 			}
+			// A failure to accept ONE connection is not the end of the listener:
+			// EMFILE and ENFILE (out of descriptors, which a flood causes and the
+			// end of the flood cures), ECONNABORTED (the peer left before it was
+			// accepted) and the like are temporary. The loop waits, 5 ms doubling to
+			// a second, as net/http's Server.Serve does, and tries again; only a
+			// closed listener, or an error that is not temporary, ends it.
+			if acceptRetryable(err) && !errors.Is(err, net.ErrClosed) {
+				backoff = min(max(2*backoff, 5*time.Millisecond), time.Second)
+				if backoff == 5*time.Millisecond { // once per streak of failures
+					s.logAcceptError(err, backoff)
+				}
+				select {
+				case <-time.After(backoff):
+				case <-s.closing:
+					return nil
+				}
+				continue
+			}
 			return err
 		}
+		backoff = 0
 		c := newConn(s, nc)
 		c.counted.Store(true)
 		if !s.admit(c) {
@@ -396,6 +430,9 @@ func (s *Server) Close() error {
 		return nil
 	}
 	s.closed = true
+	if s.closing != nil {
+		close(s.closing) // wakes an accept loop that is waiting to try again
+	}
 	lns, conns := s.lns, s.conns
 	s.lns, s.conns = nil, map[*conn]struct{}{}
 	s.mu.Unlock()
@@ -572,6 +609,7 @@ func (c *conn) serve() {
 			cn.Abandon(sl)
 			return
 		}
+		c.touch() // the idle clock counts from the last request
 		if span, ok := c.readSpan(msg); ok {
 			cn.Go(sl, span, c.runner(msg))
 		} else {

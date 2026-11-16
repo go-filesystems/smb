@@ -215,6 +215,7 @@ func (c *conn) create(h header, body []byte, msg []byte) ([]byte, error) {
 	binary.LittleEndian.PutUint64(of.id[:8], c.nextFile)
 	binary.LittleEndian.PutUint64(of.id[8:], uint64(h.treeID))
 	c.files[of.id] = of
+	c.nOpen.Add(1)
 	c.lastFile = of.id
 
 	const bodyLen = 88
@@ -310,6 +311,9 @@ func (c *conn) closeFile(h header, body []byte) ([]byte, error) {
 func (c *conn) closeOpen(of *openFile) {
 	if of.f != nil {
 		of.f.Close()
+	}
+	if _, held := c.files[of.id]; held {
+		c.nOpen.Add(-1)
 	}
 	delete(c.files, of.id)
 	of.share.locks.releaseAll(of.id)

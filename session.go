@@ -109,6 +109,10 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 		if ex == nil || h.sessionID == 0 {
 			return errorResponse(h, statusLogonFailure), nil
 		}
+		// An answer is an exchange's last leg, whatever it says: from here, every
+		// refusal -- an unparseable token, an unknown user, a wrong password -- has
+		// ended it, and a client starts again from the first leg.
+		c.endExchange(h.sessionID)
 		auth, err := parseAuth(token)
 		if err != nil {
 			return errorResponse(h, statusLogonFailure), nil
@@ -121,9 +125,6 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 			return errorResponse(h, statusLogonFailure), nil
 		}
 		key, ok := ex.challenge.verify(auth, cred)
-		// Whatever the outcome, this exchange is over: a client that was refused
-		// starts again from the first leg.
-		c.endExchange(h.sessionID)
 		if !ok {
 			return errorResponse(h, statusLogonFailure), nil
 		}
@@ -261,9 +262,16 @@ func (c *conn) logoff(h header) []byte {
 		}
 	}
 	delete(c.sessions, sid)
+	last := len(c.sessions) == 0
 	c.mu.Unlock()
 	for _, op := range ended {
 		op.stop()
+	}
+	c.endExchange(sid)
+	if last && c.srv != nil {
+		// Nobody is logged in on this connection any more: it counts as
+		// unauthenticated again, with the clock started over.
+		c.markUnauthenticated()
 	}
 	return simpleResponse(h, statusSuccess, 4)
 }

@@ -43,7 +43,40 @@ func resolveLimit(v, def int) int {
 	return v
 }
 
-func (s *Server) maxConnections() int { return resolveLimit(s.MaxConnections, DefaultMaxConnections) }
+// DefaultIdleTimeout is how long an authenticated connection with no open handle
+// and no operation pending may go without a request before it is closed. It is
+// Windows' own "autodisconnect" (15 minutes), and a client whose mount is merely
+// idle reconnects transparently; what it stops is valid credentials holding a
+// slot forever.
+const DefaultIdleTimeout = 15 * time.Minute
+
+func (s *Server) idleTimeout() time.Duration {
+	switch {
+	case s.IdleTimeout == 0:
+		return DefaultIdleTimeout
+	case s.IdleTimeout < 0:
+		return 0
+	}
+	return s.IdleTimeout
+}
+
+// defaultMaxConnections is the default for MaxConnections on a process whose
+// descriptor limit is soft: every connection is a descriptor, and so is every file
+// a driver opens, so a default above the limit is a cap that EMFILE reaches first.
+// It keeps a quarter of the descriptors for everything else. (macOS's default soft
+// limit is 256, which makes this 192; Linux's is usually 1024 or more.) Where the
+// limit is unknown there is nothing to respect.
+func defaultMaxConnections(soft uint64, known bool) int {
+	if !known || soft == 0 || soft >= 1<<31 {
+		return DefaultMaxConnections
+	}
+	return int(min(uint64(DefaultMaxConnections), max(soft*3/4, 8)))
+}
+
+func (s *Server) maxConnections() int {
+	soft, known := fdLimit()
+	return resolveLimit(s.MaxConnections, defaultMaxConnections(soft, known))
+}
 func (s *Server) maxPreAuth() int {
 	return resolveLimit(s.MaxPreAuthConnections, DefaultMaxPreAuthConnections)
 }
@@ -90,6 +123,17 @@ func (s *Server) logLimit(open, preAuth int) {
 		"max_connections", s.maxConnections(), "max_preauth_connections", s.maxPreAuth())
 }
 
+// logAcceptError says that accepting failed for a reason that will pass, and how
+// long the loop waits before trying again. The loop calls it once per streak of
+// failures, not once per attempt.
+func (s *Server) logAcceptError(err error, wait time.Duration) {
+	l := slog.Default()
+	if s.Logger != nil {
+		l = s.Logger
+	}
+	l.Warn("smb accept failed, retrying", "error", err, "wait", wait)
+}
+
 // release forgets a connection that has ended, and gives back its place among the
 // unauthenticated if it still held one.
 func (s *Server) release(c *conn) {
@@ -107,7 +151,7 @@ func (c *conn) markAuthenticated() {
 	if c.authed.Swap(true) {
 		return
 	}
-	if t := c.preTimer.Load(); t != nil {
+	if t := c.preTimer.Swap(nil); t != nil {
 		t.Stop()
 	}
 	if c.counted.CompareAndSwap(true, false) {
@@ -115,6 +159,29 @@ func (c *conn) markAuthenticated() {
 		c.srv.preAuth--
 		c.srv.mu.Unlock()
 	}
+	c.touch()
+	if d := c.srv.idleTimeout(); d > 0 {
+		c.armIdle(d)
+	}
+}
+
+// markUnauthenticated is the other way: the last session on the connection has
+// logged off, so it holds nothing it has earned. It counts as unauthenticated
+// again -- a slot of the pre-authentication cap, and the pre-authentication clock
+// starts over -- or valid credentials could take every slot by logging in and off.
+func (c *conn) markUnauthenticated() {
+	if !c.authed.Swap(false) {
+		return
+	}
+	if t := c.idleTimer.Swap(nil); t != nil {
+		t.Stop()
+	}
+	if c.counted.CompareAndSwap(false, true) {
+		c.srv.mu.Lock()
+		c.srv.preAuth++
+		c.srv.mu.Unlock()
+	}
+	c.startPreAuthClock()
 }
 
 // startPreAuthClock closes the connection if nobody has authenticated on it in
@@ -129,11 +196,49 @@ func (c *conn) startPreAuthClock() {
 			c.nc.Close()
 		}
 	})
-	c.preTimer.Store(t)
+	if old := c.preTimer.Swap(t); old != nil {
+		old.Stop()
+	}
+}
+
+// touch records that the client has just done something.
+func (c *conn) touch() { c.lastActive.Store(time.Now().UnixNano()) }
+
+func (c *conn) armIdle(d time.Duration) {
+	t := time.AfterFunc(d, c.idleCheck)
+	if old := c.idleTimer.Swap(t); old != nil {
+		old.Stop()
+	}
+}
+
+// idleCheck closes an authenticated connection that has said nothing for the idle
+// timeout and has nothing the client could be waiting on: no open handle, no
+// operation pending (a change notification is a request that is meant to wait). A
+// connection that is not idle is looked at again when it could be.
+func (c *conn) idleCheck() {
+	limit := c.srv.idleTimeout()
+	if limit <= 0 || !c.authed.Load() {
+		return
+	}
+	idle := time.Since(time.Unix(0, c.lastActive.Load()))
+	if idle >= limit {
+		c.mu.Lock()
+		waiting := len(c.waiting)
+		c.mu.Unlock()
+		if c.nOpen.Load() <= 0 && waiting == 0 {
+			c.nc.Close()
+			return
+		}
+		idle = 0 // busy with something that is not a request: ask again in a full period
+	}
+	c.armIdle(limit - idle)
 }
 
 type connLimitState struct {
-	authed   atomic.Bool
-	counted  atomic.Bool
-	preTimer atomic.Pointer[time.Timer]
+	authed     atomic.Bool
+	counted    atomic.Bool
+	preTimer   atomic.Pointer[time.Timer]
+	idleTimer  atomic.Pointer[time.Timer]
+	lastActive atomic.Int64 // UnixNano of the last frame
+	nOpen      atomic.Int64 // open handles, files and pipes
 }
