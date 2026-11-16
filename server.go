@@ -455,6 +455,10 @@ type session struct {
 	// message of it must be (Session.EncryptData, [MS-SMB2] 3.3.5.2.9).
 	crypto      *sessionCrypto
 	encryptData bool
+	// signingRequired is Session.SigningRequired ([MS-SMB2] 3.3.5.5.3 step 5): the
+	// client said, in its NEGOTIATE, that it requires signing. From then on a
+	// request that arrives neither signed nor encrypted is refused.
+	signingRequired bool
 }
 
 func (c *conn) serve() {
@@ -732,6 +736,14 @@ func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]
 			return c.finish(out, prevAt, errorResponse(h, statusUserSessionDeleted), nil, h), nil
 		}
 		signed := h.flags&flagSigned != 0 && !encrypted
+		// [MS-SMB2] 3.3.5.2.4: "the server MUST determine if the client failed to
+		// sign a packet that required it": an unsigned request on a session that
+		// requires signing is refused. An encrypted one is authenticated by its
+		// cipher, which is what an encrypting session uses instead of a
+		// signature. CANCEL is verified only when it is signed (3.3.5.16).
+		if !signed && !encrypted && sess != nil && sess.signingRequired && commandIsSigned(h.command) {
+			return c.finish(out, prevAt, errorResponse(h, statusAccessDenied), sess, h), nil
+		}
 		if signed {
 			if sess == nil || !verifyMessage(c.signAlgo(), sess.signingKey, one) {
 				return c.finish(out, prevAt, errorResponse(h, statusAccessDenied), sess, h), nil
@@ -792,6 +804,17 @@ func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]
 func commandNeedsSession(cmd command) bool {
 	switch cmd {
 	case cmdNegotiate, cmdSessionSetup, cmdEcho, cmdCancel:
+		return false
+	}
+	return true
+}
+
+// commandIsSigned is true for the commands a session that requires signing must
+// sign: all but the two that come before there is a session key, and CANCEL, which
+// the specification verifies only if it is signed (3.3.5.16).
+func commandIsSigned(cmd command) bool {
+	switch cmd {
+	case cmdNegotiate, cmdSessionSetup, cmdCancel:
 		return false
 	}
 	return true

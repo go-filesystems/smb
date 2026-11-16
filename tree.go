@@ -4,6 +4,7 @@ package smb
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -24,6 +25,10 @@ const (
 	accessAll   uint32 = 0x001F01FF
 )
 
+// errUnprotectedTreeConnect ends a 3.1.1 connection whose TREE_CONNECT is
+// neither signed nor encrypted.
+var errUnprotectedTreeConnect = errors.New("smb: an unsigned, unencrypted TREE_CONNECT on a 3.1.1 session")
+
 // treeConnect answers \\server\share by name.
 //
 // The path arrives as UTF-16, absolute and with the host in it. Only the last
@@ -33,6 +38,15 @@ const (
 func (c *conn) treeConnect(h header, body []byte, msg []byte) ([]byte, error) {
 	if c.session(h) == nil {
 		return errorResponse(h, statusUserSessionDeleted), nil
+	}
+	// [MS-SMB2] 3.3.5.7: on 3.1.1 a TREE_CONNECT from an authenticated (not guest,
+	// not anonymous) session that is neither signed nor encrypted ends the
+	// connection. The spec says "not signed or not encrypted", which read
+	// literally would refuse every signed-only request; what it can mean, and what
+	// Windows needs of a 3.1.1 client, is that the request carries one protection
+	// or the other.
+	if c.dialect == dialect311 && h.flags&flagSigned == 0 && !h.encrypted {
+		return nil, errUnprotectedTreeConnect
 	}
 	if len(body) < 8 {
 		return nil, fmt.Errorf("smb: TREE_CONNECT body of %d bytes is too short", len(body))

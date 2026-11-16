@@ -109,6 +109,7 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 			signingKey: signingKeyFor(c.dialect, key, preauth),
 		}
 		var flags uint16
+		sess.signingRequired = c.clientSecurityMode&signingRequired != 0
 		if c.encCapable() {
 			enc, dec, err := c.deriveCipherKeys(key, preauth)
 			if err != nil {
@@ -125,7 +126,7 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 		c.mu.Lock() // the goroutines that answer later read this table
 		c.sessions[h.sessionID] = sess
 		c.mu.Unlock()
-		c.logSession(h.sessionID, auth.user)
+		c.logSession(h.sessionID, auth.user, sess)
 		var done []byte
 		if c.spnego {
 			done = negTokenRespAccept()
@@ -184,14 +185,15 @@ func (s *session) wipe() {
 // logSession says, on the server's Logger at Debug level, what an
 // authenticated session negotiated: the dialect and the signing algorithm. It is
 // how a deployment reads what a given client actually got.
-func (c *conn) logSession(id uint64, user string) {
+func (c *conn) logSession(id uint64, user string, sess *session) {
 	l := slog.Default()
 	if c.srv != nil && c.srv.Logger != nil {
 		l = c.srv.Logger
 	}
 	l.Debug("smb session established", "session", id, "user", user,
 		"dialect", dialectName(c.dialect), "signing", c.signAlgo().String(),
-		"cipher", c.sessionCipherName(), "encrypt_data", c.srv.EncryptData && c.encCapable())
+		"cipher", c.sessionCipherName(), "encrypt_data", c.srv.EncryptData && c.encCapable(),
+		"signing_required", sess.signingRequired)
 }
 
 // sessionCipherName is the cipher the session's messages would use, or "none"
