@@ -178,8 +178,18 @@ func (c *conn) markUnauthenticated() {
 	}
 	if c.counted.CompareAndSwap(false, true) {
 		c.srv.mu.Lock()
-		c.srv.preAuth++
+		over := c.srv.maxPreAuth() > 0 && c.srv.preAuth >= c.srv.maxPreAuth()
+		if !over {
+			c.srv.preAuth++
+		}
 		c.srv.mu.Unlock()
+		if over {
+			// The unauthenticated cap is full: this connection would exceed it by
+			// returning to it, so it goes instead (a client reconnects).
+			c.counted.Store(false)
+			c.nc.Close()
+			return
+		}
 	}
 	c.startPreAuthClock()
 }
@@ -191,6 +201,9 @@ func (c *conn) startPreAuthClock() {
 	if d <= 0 {
 		return
 	}
+	if c.ended.Load() {
+		return
+	}
 	t := time.AfterFunc(d, func() {
 		if !c.authed.Load() {
 			c.nc.Close()
@@ -199,15 +212,38 @@ func (c *conn) startPreAuthClock() {
 	if old := c.preTimer.Swap(t); old != nil {
 		old.Stop()
 	}
+	if c.ended.Load() {
+		t.Stop()
+	}
+}
+
+// stopClocks ends both clocks for good: the connection is over. A timer holds the
+// connection it closes over, and the idle one re-arms itself for as long as a
+// handle is open, so one left running after a client dropped with a file open
+// would keep the connection -- its tables and buffers -- alive for ever.
+func (c *conn) stopClocks() {
+	c.ended.Store(true)
+	if t := c.preTimer.Swap(nil); t != nil {
+		t.Stop()
+	}
+	if t := c.idleTimer.Swap(nil); t != nil {
+		t.Stop()
+	}
 }
 
 // touch records that the client has just done something.
 func (c *conn) touch() { c.lastActive.Store(time.Now().UnixNano()) }
 
 func (c *conn) armIdle(d time.Duration) {
+	if c.ended.Load() {
+		return
+	}
 	t := time.AfterFunc(d, c.idleCheck)
 	if old := c.idleTimer.Swap(t); old != nil {
 		old.Stop()
+	}
+	if c.ended.Load() { // the connection ended while this was being armed
+		t.Stop()
 	}
 }
 
@@ -217,7 +253,7 @@ func (c *conn) armIdle(d time.Duration) {
 // connection that is not idle is looked at again when it could be.
 func (c *conn) idleCheck() {
 	limit := c.srv.idleTimeout()
-	if limit <= 0 || !c.authed.Load() {
+	if limit <= 0 || !c.authed.Load() || c.ended.Load() {
 		return
 	}
 	idle := time.Since(time.Unix(0, c.lastActive.Load()))
@@ -241,4 +277,5 @@ type connLimitState struct {
 	idleTimer  atomic.Pointer[time.Timer]
 	lastActive atomic.Int64 // UnixNano of the last frame
 	nOpen      atomic.Int64 // open handles, files and pipes
+	ended      atomic.Bool  // serve has returned: no clock may be armed
 }

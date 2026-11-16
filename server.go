@@ -533,11 +533,7 @@ func (c *conn) serve() {
 	defer c.nc.Close()
 	c.seq = newSeqWindow()
 	c.startPreAuthClock()
-	defer func() {
-		if t := c.preTimer.Load(); t != nil {
-			t.Stop()
-		}
-	}()
+	defer c.stopClocks() // a clock that outlived its connection would pin it
 	// Registered first, so it runs last: nothing is in flight that could still
 	// use the keys. (Sessions still open when the connection drops were never
 	// logged off.)
