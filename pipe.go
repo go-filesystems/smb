@@ -58,6 +58,7 @@ func (c *conn) openPipe(h header, name string) ([]byte, error) {
 	binary.LittleEndian.PutUint64(of.id[:8], c.nextFile)
 	binary.LittleEndian.PutUint64(of.id[8:], uint64(h.treeID))
 	c.files[of.id] = of
+	c.nOpen.Add(1)
 	c.lastFile = of.id
 
 	const bodyLen = 88
