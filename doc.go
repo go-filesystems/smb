@@ -70,6 +70,11 @@
 // and 3.3.5.2.3: the MessageIds it will accept, { 0 } at the start and extended by
 // the credits its replies carry. Each id is accepted once; a request outside the
 // window -- a replayed one, or one nobody was granted -- ends the connection.
+// The id is taken before the signature is verified, which is the order the
+// specification gives (3.3.5.2.3 before 3.3.5.2.4): a forged request can use up an
+// id, so it can end a connection, and cannot do more than a peer that closes the
+// socket. The credits a client may hold unused are capped, fewer before anybody
+// has authenticated.
 //
 // Offering encryption changes nothing for a client that does not ask for it.
 // Requiring it is two options: [RequireEncryption] on one share (TREE_CONNECT

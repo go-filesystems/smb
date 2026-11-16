@@ -82,6 +82,11 @@ func (c *conn) finishAsync(op *pendingOp, reply []byte) {
 		// request was encrypted, encrypted: it is dropped, never sent as it is.
 		return
 	}
+	// The credits were granted in the interim reply ([MS-SMB2] 3.3.4.1.2: "any
+	// credits to be granted MUST be granted in the interim response"), so this
+	// one grants none: a client counts every CreditResponse, and the window was
+	// extended by the interim's already.
+	binary.LittleEndian.PutUint16(reply[offCredits:], 0)
 	c.noteReply(reply)
 	c.send(c.finalReply(op, sess, op.session, reply))
 }
@@ -149,6 +154,7 @@ func (c *conn) cancel(h header) ([]byte, error) {
 	reply := asyncResponse(header{command: found.commandOf(), messageID: found.messageID},
 		statusCancelled, found.asyncID, 9)
 	binary.LittleEndian.PutUint16(reply[headerLen:], 9)
+	binary.LittleEndian.PutUint16(reply[offCredits:], 0) // see finishAsync
 	c.noteReply(reply)
 	return nil, c.send(c.finalReply(found, sess, h.sessionID, reply))
 }

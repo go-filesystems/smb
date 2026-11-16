@@ -71,6 +71,14 @@ type Server struct {
 	// To require it of one share only, use [RequireEncryption]. Set it before
 	// the first connection.
 	EncryptData bool
+	// RequireSigning makes the server require message signing of every client
+	// ([MS-SMB2] 3.3.5.4: SMB2_NEGOTIATE_SIGNING_REQUIRED in the NEGOTIATE
+	// response): every session is held to it, so a request that arrives neither
+	// signed nor encrypted is refused with STATUS_ACCESS_DENIED whether or not
+	// the client asked for signing. Windows clients require it already; this is
+	// what makes the server the one that insists. Set it before the first
+	// connection.
+	RequireSigning bool
 	// DisableEncryption stops the server offering encryption at all: no
 	// ENCRYPTION context is answered on 3.1.1 and the capability is not claimed
 	// on 3.0 and 3.0.2. It outranks [Server.EncryptData] and [RequireEncryption],
@@ -409,12 +417,15 @@ type conn struct {
 	preauth        []byte
 	pendingPreauth []byte
 	pendingSID     uint64 // the session id allocated to the challenge in progress
-	nextID         uint64
-	sessions       map[uint64]*session
-	trees          map[uint32]*treeConn
-	nextTree       uint32
-	pending        *challenge // the NTLM challenge sent, awaiting its answer
-	spnego         bool       // whether this client wraps its tokens, or sends them bare
+	// pendingReauth is the existing session a challenge in progress is for, when
+	// the exchange is that session authenticating again; nil for a new session.
+	pendingReauth *session
+	nextID        uint64
+	sessions      map[uint64]*session
+	trees         map[uint32]*treeConn
+	nextTree      uint32
+	pending       *challenge // the NTLM challenge sent, awaiting its answer
+	spnego        bool       // whether this client wraps its tokens, or sends them bare
 
 	panicked any // what a connection died of, for a test to insist on
 	files    map[[16]byte]*openFile
@@ -668,8 +679,17 @@ func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]
 		// it cancels and consumes no id of its own (3.3.1.1). Each operation of a
 		// compound has an id of its own and uses it up here, even one that is then
 		// skipped for the failure before it.
-		if c.seq != nil && h.command != cmdCancel && !c.seq.take(h.messageID, uint32(h.creditCharge)) {
-			return nil, errSequence
+		credited := uint16(0)
+		if c.seq != nil && h.command != cmdCancel {
+			if !c.seq.take(h.messageID, uint32(h.creditCharge)) {
+				return nil, errSequence
+			}
+			// How many credits the reply grants is the server's to decide
+			// ([MS-SMB2] 3.3.1.2): what the client asked for, but never so many
+			// that it holds more than the connection is allowed (see creditCap).
+			// Every reply built from this header, including a refusal, carries it.
+			credited = c.seq.allow(creditsFor(h), c.creditCap())
+			h.credits = credited
 		}
 		// The related-operations flag means this request speaks about what the
 		// first one opened: it carries no session or tree of its own.
@@ -697,7 +717,7 @@ func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]
 		// The status is the previous one, not an invented one: the client sees
 		// the same reason twice and knows the chain did not happen.
 		if h.flags&flagRelatedOps != 0 && prevStatus != statusSuccess {
-			reply := errorResponse(h, prevStatus)
+			reply := compoundReply(errorResponse(h, prevStatus), h.nextCommand != 0)
 			if h.flags&flagSigned != 0 {
 				if sess := c.sessions[binary.LittleEndian.Uint64(one[offSessionID:])]; sess != nil {
 					signMessage(c.signAlgo(), sess.signingKey, reply)
@@ -742,10 +762,12 @@ func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]
 		// cipher, which is what an encrypting session uses instead of a
 		// signature. CANCEL is verified only when it is signed (3.3.5.16).
 		if !signed && !encrypted && sess != nil && sess.signingRequired && commandIsSigned(h.command) {
+			c.logRefused(h, "not signed, and the session requires signing")
 			return c.finish(out, prevAt, errorResponse(h, statusAccessDenied), sess, h), nil
 		}
 		if signed {
 			if sess == nil || !verifyMessage(c.signAlgo(), sess.signingKey, one) {
+				c.logRefused(h, "the signature does not verify")
 				return c.finish(out, prevAt, errorResponse(h, statusAccessDenied), sess, h), nil
 			}
 		}
@@ -764,9 +786,12 @@ func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]
 			*seal = sealing{binary.LittleEndian.Uint64(one[offSessionID:]), sess.crypto}
 		}
 
-		reply, err := c.dispatchEnc(one, encrypted)
+		reply, err := c.dispatchEnc(one, encrypted, credited)
 		if err != nil {
 			return nil, err
+		}
+		if reply != nil {
+			reply = compoundReply(reply, h.nextCommand != 0)
 		}
 		// Signed in kind: a client that signed its request checks the reply,
 		// and one that did not would reject a signature it cannot verify.
@@ -796,6 +821,26 @@ func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]
 		}
 		msg = msg[end:]
 	}
+}
+
+// compoundReply readies one reply of a chain for signing. When more requests
+// follow in the chain, more replies will follow this one, so it is padded to an
+// eight-byte boundary and its NextCommand says how far the next one is -- and this
+// is done BEFORE it is signed, because the signature covers the whole header and
+// "any padding at the end of the message MUST be used in the hash computation"
+// ([MS-SMB2] 3.1.4.1). Signing first and padding after, which this server did,
+// produced a signature no client that verifies compounded replies can accept:
+// macOS, once the server required signing, dropped the mount after its first
+// CREATE + QUERY_INFO + CLOSE.
+func compoundReply(reply []byte, more bool) []byte {
+	if !more || len(reply) < headerLen {
+		return reply
+	}
+	for len(reply)%8 != 0 {
+		reply = append(reply, 0)
+	}
+	binary.LittleEndian.PutUint32(reply[offNextCommand:], uint32(len(reply)))
+	return reply
 }
 
 // commandNeedsSession is false for the commands that are legitimate with no
@@ -868,12 +913,16 @@ func (c *conn) encryptionRequired(cmd command, sess *session, tree *treeConn) bo
 // dispatch answers one message. An error stops the connection; a nil response
 // means there is nothing to send back.
 func (c *conn) dispatch(msg []byte) ([]byte, error) {
-	return c.dispatchEnc(msg, false)
+	return c.dispatchEnc(msg, false, 0)
 }
 
 // dispatchEnc is dispatch for a message that did, or did not, arrive encrypted:
 // an operation that answers later must answer encrypted too.
-func (c *conn) dispatchEnc(msg []byte, encrypted bool) ([]byte, error) {
+//
+// credits, when not zero, is how many credits the reply grants: it is set on the
+// parsed header and not written into the message, because the message is what a
+// signature and the pre-authentication hash were computed over.
+func (c *conn) dispatchEnc(msg []byte, encrypted bool, credits uint16) ([]byte, error) {
 	// The legacy greeting is the one SMB1 message this server reads, and the
 	// only answer it gives is an SMB2 negotiate response naming the wildcard
 	// dialect: "ask me again in SMB2".
@@ -885,6 +934,9 @@ func (c *conn) dispatchEnc(msg []byte, encrypted bool) ([]byte, error) {
 		return nil, err
 	}
 	h.encrypted = encrypted
+	if credits != 0 {
+		h.credits = credits
+	}
 	body := msg[headerLen:]
 	if c.dialect != 0 && h.command != cmdNegotiate && creditChargeTooLow(h, body) {
 		return errorResponse(h, statusInvalidParameter), nil

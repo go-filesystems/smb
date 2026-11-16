@@ -37,6 +37,50 @@ type seqWindow struct {
 	mu          sync.Mutex
 	base, limit uint64
 	used        map[uint64]struct{}
+	// reserved is credits promised in replies that are being built and have not
+	// been sent yet: they are already spoken for when the next request asks how
+	// many more may be granted.
+	reserved uint64
+}
+
+// What a client may hold unused. A credit is a right to send a request, and a
+// connection that has not authenticated has no business holding many of them: a
+// peer that never logs in gets a handful, one that does gets enough for the large
+// reads and writes a file manager keeps in flight (macOS asks for 256 at the
+// start; Windows and the Linux kernel client for a few hundred at most).
+const (
+	creditCapAnonymous     = 64
+	creditCapAuthenticated = 2048
+)
+
+// available is the number of granted ids the client has not used: the credits it
+// holds.
+func (w *seqWindow) available() uint64 { return w.limit - w.base - uint64(len(w.used)) }
+
+// allow says how many credits a reply may grant when the request asked for want,
+// so that the client never holds more than cap (3.3.1.2: how many to grant is
+// the server's policy; 3.3.4.1.2: it is in the reply). At least one is always
+// granted, so that a request that consumed credits is never answered with a
+// client that has none left to send the next. The grant is reserved until the
+// reply is sent and counted.
+func (w *seqWindow) allow(want uint16, cap uint64) uint16 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var room uint64
+	if held := w.available() + w.reserved; cap > held {
+		room = cap - held
+	}
+	g := min(uint64(want), room)
+	g = max(g, 1)
+	w.reserved += g
+	return uint16(g)
+}
+
+// release returns the reservation of credits that a sent reply has now granted.
+func (w *seqWindow) release(n uint16) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.reserved -= min(w.reserved, uint64(n))
 }
 
 func newSeqWindow() *seqWindow {
@@ -111,8 +155,20 @@ func (c *conn) noteReply(plain []byte) {
 	for n := grantedBy(plain); n > 0; {
 		step := uint16(min(n, 0xFFFF))
 		c.seq.grant(step)
+		c.seq.release(step)
 		n -= uint64(step)
 	}
+}
+
+// creditCap is how many unused credits this connection may hold: few until
+// somebody has authenticated.
+func (c *conn) creditCap() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.sessions) == 0 {
+		return creditCapAnonymous
+	}
+	return creditCapAuthenticated
 }
 
 // errSequence ends a connection whose client sent a MessageId the window does not

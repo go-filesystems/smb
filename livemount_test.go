@@ -220,6 +220,62 @@ func TestLiveMountEncrypted(t *testing.T) {
 	}
 }
 
+// The kernel client against a server that REQUIRES signing, which the kernel
+// learns from the NEGOTIATE response, not from any mount option: it must sign
+// everything, or the server refuses it, so a mount that works and reads a file is
+// the proof. Also the 3.1.1 TREE_CONNECT rule, which a kernel that did not sign
+// or encrypt its tree connect would fail.
+func TestLiveMountSigningRequired(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("mount -t cifs is Linux's")
+	}
+	if os.Geteuid() != 0 {
+		if _, err := exec.LookPath("sudo"); err != nil {
+			t.Skip("mounting needs root, and there is no sudo here")
+		}
+	}
+	mem := newMemFS(true)
+	body := bytes.Repeat([]byte("signed "), 20000)
+	if err := mem.WriteFile("/signed.txt", body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var negotiated lockedBuffer
+	srv := fssmb.New()
+	srv.RequireSigning = true
+	srv.Logger = slog.New(slog.NewTextHandler(&negotiated, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	srv.AddUser("alice", "hunter2")
+	if err := srv.Share("disk", mem); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve(ln)
+	defer srv.Close()
+	mnt := filepath.Join(t.TempDir(), "mnt")
+	if err := os.Mkdir(mnt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	opts := fmt.Sprintf("port=%d,username=alice,password=hunter2,uid=%d,gid=%d",
+		ln.Addr().(*net.TCPAddr).Port, os.Getuid(), os.Getgid())
+	if out, err := run("mount", "-t", "cifs", "//127.0.0.1/disk", mnt, "-o", opts); err != nil {
+		fatal(t, "mounting from a server that requires signing: %v\n%s", err, out)
+	}
+	defer run("umount", mnt)
+	got, err := os.ReadFile(filepath.Join(mnt, "signed.txt"))
+	if err != nil {
+		fatal(t, "reading through the mount: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("read %d bytes, want %d", len(got), len(body))
+	}
+	t.Logf("the server logged: %s", strings.TrimSpace(negotiated.String()))
+	if !strings.Contains(negotiated.String(), "signing_required=true") {
+		t.Errorf("the session does not record that signing is required: %s", negotiated.String())
+	}
+}
+
 // fatal fails with the kernel's own account of what went wrong. The client
 // here is a kernel module: it reports EIO or "Invalid argument" to userspace
 // and writes the actual reason to the log, so a lane without this says only

@@ -181,6 +181,45 @@ func TestSigningRequiredComesFromTheClient(t *testing.T) {
 	}
 }
 
+// The server can be the one that insists: with RequireSigning its NEGOTIATE
+// response says so (3.3.5.4), a client that did NOT ask for signing signs anyway
+// -- go-smb2 does what the response says -- and every session is held to it.
+func TestTheServerCanRequireSigning(t *testing.T) {
+	for _, dialect := range []uint16{0x0210, 0x0300, 0x0302, 0x0311} {
+		addr, srv := serve(t)
+		srv.RequireSigning = true
+		var log lockedBuffer
+		srv.Logger = slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		mem := newMemFS(true)
+		mem.WriteFile("/a.txt", []byte("insisted"), 0o644)
+		if err := srv.Share("disk", mem); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		d := &smb2.Dialer{
+			Negotiator: smb2.Negotiator{SpecifiedDialect: dialect, RequireMessageSigning: false},
+			Initiator:  &smb2.NTLMInitiator{User: "alice", Password: "hunter2"},
+		}
+		s, err := d.Dial(ctx, addr)
+		if err != nil {
+			t.Fatalf("%#04x: %v", dialect, err)
+		}
+		fs, err := s.Mount("disk")
+		if err != nil {
+			t.Fatalf("%#04x: %v", dialect, err)
+		}
+		if got, err := fs.ReadFile("a.txt"); err != nil || string(got) != "insisted" {
+			t.Errorf("%#04x: reading: %q %v", dialect, got, err)
+		}
+		fs.Umount()
+		s.Logoff()
+		cancel()
+		if !strings.Contains(log.String(), "signing_required=true") {
+			t.Errorf("%#04x: the session is not held to signing: %s", dialect, log.String())
+		}
+	}
+}
+
 // What a client NEGOTIATED, read from the server's side: a session logs its
 // dialect and signing algorithm at Debug level. go-smb2 is a client this
 // project did not write, and it checks the server's signature on the session

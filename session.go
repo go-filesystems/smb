@@ -43,6 +43,24 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 		return errorResponse(h, statusLogonFailure), nil
 	}
 
+	// [MS-SMB2] 3.3.5.5: a SESSION_SETUP names one of three things. SessionId 0 is
+	// a new session, and its id is the SERVER's to choose; a SessionId that is
+	// already a session is that session authenticating again; any other id was
+	// never given out by this server (or is the exchange this very connection is in
+	// the middle of), and a client does not get to choose a fresh one.
+	existing := c.sessions[h.sessionID]
+	if h.sessionID != 0 && existing == nil && h.sessionID != c.pendingSID {
+		return errorResponse(h, statusUserSessionDeleted), nil
+	}
+	// Authenticating again, as the same session: the session is not replaced, so
+	// whoever asks has to prove they are its owner first -- the request must be
+	// signed with the session's own key (verified before it gets here) or
+	// encrypted, as 3.3.5.5.2 requires, or anybody on the connection who can make
+	// up a valid account could take the session over.
+	if existing != nil && h.flags&flagSigned == 0 && !h.encrypted {
+		return errorResponse(h, statusAccessDenied), nil
+	}
+
 	switch binary.LittleEndian.Uint32(token[8:]) {
 	case ntlmNegotiate:
 		ch, challenge, err := newChallenge(c.srv.serverName())
@@ -56,11 +74,18 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 		}
 		id := h.sessionID
 		if id == 0 {
-			c.nextID++
+			// The server's choice, and never an id that is a session already.
+			for {
+				c.nextID++
+				if c.nextID != 0 && c.sessions[c.nextID] == nil {
+					break
+				}
+			}
 			id = c.nextID
 		}
 		h.sessionID = id
 		c.pendingSID = id
+		c.pendingReauth = existing
 		// In kind: wrapped for a client that wrapped, bare for one that did
 		// not. Linux's kernel client is the second kind.
 		reply := challenge
@@ -96,6 +121,29 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 			return errorResponse(h, statusLogonFailure), nil
 		}
 		c.pending = nil
+		reauth := c.pendingReauth
+		c.pendingSID, c.pendingReauth = 0, nil
+		if reauth != nil {
+			// A session authenticating again keeps everything it has -- its keys,
+			// its trees, its handles -- and must be the same user: a different one
+			// is refused, and the session it asked to take over is left exactly as
+			// it was. (The session must also still be the one the exchange began
+			// with, and the request signed or encrypted like the first.)
+			if existing != reauth || auth.user != reauth.user {
+				return errorResponse(h, statusAccessDenied), nil
+			}
+			var flags uint16
+			if reauth.encryptData {
+				flags |= sessionFlagEncryptData
+			}
+			var done []byte
+			if c.spnego {
+				done = negTokenRespAccept()
+			}
+			reply := c.sessionSetupResponse(h, statusSuccess, flags, done)
+			signMessage(c.signAlgo(), reauth.signingKey, reply)
+			return reply, nil
+		}
 		var preauth []byte
 		if c.dialect == dialect311 {
 			// The last request is in the hash that derives the keys; the last
@@ -109,7 +157,8 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 			signingKey: signingKeyFor(c.dialect, key, preauth),
 		}
 		var flags uint16
-		sess.signingRequired = c.clientSecurityMode&signingRequired != 0
+		// [MS-SMB2] 3.3.5.5.3 step 5: the client required it, or the server does.
+		sess.signingRequired = c.clientSecurityMode&signingRequired != 0 || c.srv.RequireSigning
 		if c.encCapable() {
 			enc, dec, err := c.deriveCipherKeys(key, preauth)
 			if err != nil {
@@ -194,6 +243,15 @@ func (c *conn) logSession(id uint64, user string, sess *session) {
 		"dialect", dialectName(c.dialect), "signing", c.signAlgo().String(),
 		"cipher", c.sessionCipherName(), "encrypt_data", c.srv.EncryptData && c.encCapable(),
 		"signing_required", sess.signingRequired)
+}
+
+// logRefused says, at Debug level, that a request was refused and why.
+func (c *conn) logRefused(h header, why string) {
+	l := slog.Default()
+	if c.srv != nil && c.srv.Logger != nil {
+		l = c.srv.Logger
+	}
+	l.Debug("smb request refused", "command", h.command.String(), "session", h.sessionID, "why", why)
 }
 
 // sessionCipherName is the cipher the session's messages would use, or "none"
