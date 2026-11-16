@@ -96,7 +96,7 @@ func TestAnUnsignedSessionSetupCannotTakeOverASession(t *testing.T) {
 		t.Errorf("an unsigned SESSION_SETUP on a live session answered %#x, want ACCESS_DENIED", st)
 	}
 	// Whatever a client does with a challenge it was never given.
-	if c.pending != nil {
+	if len(c.exchanges) != 0 {
 		t.Error("a challenge was issued for the unsigned request")
 	}
 	out, _ = c.dispatchChain(r.setup(1, ntlmType3(&challenge{}, "mallory", "pw"), false))
@@ -132,10 +132,10 @@ func TestAReauthenticationMustBeTheSameUser(t *testing.T) {
 		if err != nil || statusOf(t, out) != statusMoreProcessing {
 			t.Fatalf("%s: the first leg: %v %#x", tc.user, err, statusOf(t, out))
 		}
-		if c.pending == nil {
+		if c.exchanges[1] == nil {
 			t.Fatalf("%s: no challenge", tc.user)
 		}
-		out, err = c.dispatchChain(r.setup(1, ntlmType3(c.pending, tc.user, tc.password), true))
+		out, err = c.dispatchChain(r.setup(1, ntlmType3(c.exchanges[1].challenge, tc.user, tc.password), true))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -146,7 +146,7 @@ func TestAReauthenticationMustBeTheSameUser(t *testing.T) {
 			t.Error("the answer is not signed with the session's key")
 		}
 		sessionIntact(t, r, alice, of)
-		if c.pendingSID != 0 || c.pendingReauth != nil {
+		if len(c.exchanges) != 0 || len(c.exchangeOrder) != 0 {
 			t.Errorf("%s: the exchange left state behind", tc.user)
 		}
 	}
@@ -166,7 +166,7 @@ func TestAClientCannotChooseASessionId(t *testing.T) {
 		if st := statusOf(t, out); st != statusUserSessionDeleted {
 			t.Errorf("a made-up session id %d answered %#x, want USER_SESSION_DELETED", sid, st)
 		}
-		if c.pending != nil {
+		if len(c.exchanges) != 0 {
 			t.Errorf("a challenge was issued for the made-up id %d", sid)
 		}
 	}
@@ -180,7 +180,7 @@ func TestAClientCannotChooseASessionId(t *testing.T) {
 		t.Errorf("the server gave the new session id %d", got)
 	}
 	// And its second leg must carry that id: a different one is refused.
-	out, _ = c.dispatchChain(r.setup(got+1000, ntlmType3(c.pending, "mallory", "pw"), false))
+	out, _ = c.dispatchChain(r.setup(got+1000, ntlmType3(c.exchanges[got].challenge, "mallory", "pw"), false))
 	if st := statusOf(t, out); st == statusSuccess {
 		t.Error("the second leg of a new session succeeded under another id")
 	}
