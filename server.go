@@ -435,20 +435,17 @@ type conn struct {
 	// zero for none). See encCapable.
 	cipherID uint16
 	// preauth is the pre-authentication integrity hash after NEGOTIATE (3.1.1
-	// only); pendingPreauth continues it through the SESSION_SETUP exchange in
-	// progress. See preauth.go.
-	preauth        []byte
-	pendingPreauth []byte
-	pendingSID     uint64 // the session id allocated to the challenge in progress
-	// pendingReauth is the existing session a challenge in progress is for, when
-	// the exchange is that session authenticating again; nil for a new session.
-	pendingReauth *session
+	// only); each exchange continues it from there. See preauth.go.
+	preauth []byte
+	// exchanges are the authentications in progress, keyed by the session id the
+	// server allocated to each, and exchangeOrder is the order they began in, for
+	// dropping the oldest when there are too many. See session.go.
+	exchanges     map[uint64]*exchange
+	exchangeOrder []uint64
 	nextID        uint64
 	sessions      map[uint64]*session
 	trees         map[uint32]*treeConn
 	nextTree      uint32
-	pending       *challenge // the NTLM challenge sent, awaiting its answer
-	spnego        bool       // whether this client wraps its tokens, or sends them bare
 
 	panicked any // what a connection died of, for a test to insist on
 	files    map[[16]byte]*openFile

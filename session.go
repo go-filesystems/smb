@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"slices"
 )
 
 // sessionSetup runs the two halves of NTLM.
@@ -49,7 +50,7 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 	// never given out by this server (or is the exchange this very connection is in
 	// the middle of), and a client does not get to choose a fresh one.
 	existing := c.sessions[h.sessionID]
-	if h.sessionID != 0 && existing == nil && h.sessionID != c.pendingSID {
+	if h.sessionID != 0 && existing == nil && c.exchanges[h.sessionID] == nil {
 		return errorResponse(h, statusUserSessionDeleted), nil
 	}
 	// Authenticating again, as the same session: the session is not replaced, so
@@ -67,25 +68,27 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		c.pending = ch
-		c.spnego = wrapped
+		ex := &exchange{challenge: ch, spnego: wrapped, reauth: existing}
 		if c.dialect == dialect311 {
-			c.pendingPreauth = preauthExtend(c.preauth, msg)
+			ex.preauth = preauthExtend(c.preauth, msg)
 		}
 		id := h.sessionID
 		if id == 0 {
-			// The server's choice, and never an id that is a session already.
+			// The server's choice, and never an id that is a session or an exchange
+			// already.
 			for {
 				c.nextID++
-				if c.nextID != 0 && c.sessions[c.nextID] == nil {
+				if c.nextID != 0 && c.sessions[c.nextID] == nil && c.exchanges[c.nextID] == nil {
 					break
 				}
 			}
 			id = c.nextID
 		}
 		h.sessionID = id
-		c.pendingSID = id
-		c.pendingReauth = existing
+		// Keyed by the id it was given, so another SESSION_SETUP -- an injected one
+		// with SessionId 0, say -- starts an exchange of its own and cannot overwrite
+		// this one.
+		c.beginExchange(id, ex)
 		// In kind: wrapped for a client that wrapped, bare for one that did
 		// not. Linux's kernel client is the second kind.
 		reply := challenge
@@ -94,7 +97,7 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 		}
 		resp := c.sessionSetupResponse(h, statusMoreProcessing, 0, reply)
 		if c.dialect == dialect311 {
-			c.pendingPreauth = preauthExtend(c.pendingPreauth, resp)
+			ex.preauth = preauthExtend(ex.preauth, resp)
 		}
 		return resp, nil
 
@@ -102,7 +105,8 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 		// The answer is for the session that was allocated to the challenge: a
 		// session id the client makes up (0, say, which means "no session") is not
 		// one this exchange created.
-		if c.pending == nil || h.sessionID == 0 || h.sessionID != c.pendingSID {
+		ex := c.exchanges[h.sessionID]
+		if ex == nil || h.sessionID == 0 {
 			return errorResponse(h, statusLogonFailure), nil
 		}
 		auth, err := parseAuth(token)
@@ -116,13 +120,14 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 			// exist.
 			return errorResponse(h, statusLogonFailure), nil
 		}
-		key, ok := c.pending.verify(auth, cred)
+		key, ok := ex.challenge.verify(auth, cred)
+		// Whatever the outcome, this exchange is over: a client that was refused
+		// starts again from the first leg.
+		c.endExchange(h.sessionID)
 		if !ok {
 			return errorResponse(h, statusLogonFailure), nil
 		}
-		c.pending = nil
-		reauth := c.pendingReauth
-		c.pendingSID, c.pendingReauth = 0, nil
+		reauth := ex.reauth
 		if reauth != nil {
 			// A session authenticating again keeps everything it has -- its keys,
 			// its trees, its handles -- and must be the same user: a different one
@@ -137,7 +142,7 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 				flags |= sessionFlagEncryptData
 			}
 			var done []byte
-			if c.spnego {
+			if ex.spnego {
 				done = negTokenRespAccept()
 			}
 			reply := c.sessionSetupResponse(h, statusSuccess, flags, done)
@@ -148,8 +153,7 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 		if c.dialect == dialect311 {
 			// The last request is in the hash that derives the keys; the last
 			// response, which they sign, is not.
-			preauth = preauthExtend(c.pendingPreauth, msg)
-			c.pendingPreauth = nil
+			preauth = preauthExtend(ex.preauth, msg)
 		}
 		sess := &session{
 			user:       auth.user,
@@ -178,7 +182,7 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 		c.markAuthenticated()
 		c.logSession(h.sessionID, auth.user, sess)
 		var done []byte
-		if c.spnego {
+		if ex.spnego {
 			done = negTokenRespAccept()
 		}
 		// The last message of the authentication is signed even though the
@@ -191,6 +195,46 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 	default:
 		return errorResponse(h, statusLogonFailure), nil
 	}
+}
+
+// An exchange is one authentication in progress: the challenge that was sent, how
+// the client wraps its tokens, the pre-authentication hash so far (3.1.1), and the
+// session it is re-authenticating, if it is one. A connection may have several,
+// each keyed by the session id the server allocated to it ([MS-SMB2] 3.3.5.5.1: the
+// session is created at the first leg, with its own PreauthIntegrityHashValue).
+type exchange struct {
+	challenge *challenge
+	spnego    bool
+	preauth   []byte
+	reauth    *session
+}
+
+// maxPendingExchanges bounds the exchanges one connection may have in progress.
+// Past it the OLDEST is dropped: memory stays bounded, and a peer that starts
+// exchanges it never finishes has to start this many to push a real one out.
+const maxPendingExchanges = 16
+
+func (c *conn) beginExchange(id uint64, ex *exchange) {
+	if c.exchanges == nil {
+		c.exchanges = map[uint64]*exchange{}
+	}
+	if _, again := c.exchanges[id]; again {
+		c.exchangeOrder = slices.DeleteFunc(c.exchangeOrder, func(x uint64) bool { return x == id })
+	}
+	c.exchanges[id] = ex
+	c.exchangeOrder = append(c.exchangeOrder, id)
+	for len(c.exchangeOrder) > maxPendingExchanges {
+		delete(c.exchanges, c.exchangeOrder[0])
+		c.exchangeOrder = c.exchangeOrder[1:]
+	}
+}
+
+func (c *conn) endExchange(id uint64) {
+	if _, ok := c.exchanges[id]; !ok {
+		return
+	}
+	delete(c.exchanges, id)
+	c.exchangeOrder = slices.DeleteFunc(c.exchangeOrder, func(x uint64) bool { return x == id })
 }
 
 // logoff ends a session and everything that lives in it ([MS-SMB2] 3.3.5.6):
