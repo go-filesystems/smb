@@ -31,6 +31,7 @@ type pendingOp struct {
 	messageID uint64
 	asyncID   uint64
 	file      [16]byte // the handle it belongs to, so closing that handle ends it
+	session   uint64   // whose operation it is: the answer is signed with THIS session's key
 	cancel    chan struct{}
 	once      sync.Once
 }
@@ -48,6 +49,7 @@ func (c *conn) beginAsync(h header, file [16]byte) (*pendingOp, []byte) {
 		messageID: h.messageID,
 		asyncID:   c.nextAsync,
 		file:      file,
+		session:   h.sessionID,
 		cancel:    make(chan struct{}),
 	}
 	c.waiting[op.asyncID] = op
@@ -65,15 +67,20 @@ func (c *conn) finishAsync(op *pendingOp, reply []byte) {
 	c.mu.Lock()
 	_, live := c.waiting[op.asyncID]
 	delete(c.waiting, op.asyncID)
-	sess := c.sessions[c.asyncSession]
+	sess := c.sessions[op.session]
 	c.mu.Unlock()
 	if !live {
 		// Cancelled, and already answered by whoever cancelled it.
 		return
 	}
-	if sess != nil {
-		signMessage(c.signAlgo(), sess.signingKey, reply)
+	if sess == nil {
+		// The session that asked is gone (LOGOFF drops its operations, but one may
+		// have been about to answer). Nobody is left to read the answer, and
+		// without the session's key it can be neither signed nor, where the
+		// request was encrypted, encrypted: it is dropped, never sent as it is.
+		return
 	}
+	signMessage(c.signAlgo(), sess.signingKey, reply)
 	c.send(reply)
 }
 

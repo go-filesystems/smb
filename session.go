@@ -55,6 +55,7 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 			id = c.nextID
 		}
 		h.sessionID = id
+		c.pendingSID = id
 		// In kind: wrapped for a client that wrapped, bare for one that did
 		// not. Linux's kernel client is the second kind.
 		reply := challenge
@@ -68,7 +69,10 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 		return resp, nil
 
 	case ntlmAuth:
-		if c.pending == nil {
+		// The answer is for the session that was allocated to the challenge: a
+		// session id the client makes up (0, say, which means "no session") is not
+		// one this exchange created.
+		if c.pending == nil || h.sessionID == 0 || h.sessionID != c.pendingSID {
 			return errorResponse(h, statusLogonFailure), nil
 		}
 		auth, err := parseAuth(token)
@@ -94,11 +98,14 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 			preauth = preauthExtend(c.pendingPreauth, msg)
 			c.pendingPreauth = nil
 		}
-		c.sessions[h.sessionID] = &session{
+		sess := &session{
 			user:       auth.user,
 			sessionKey: key,
 			signingKey: signingKeyFor(c.dialect, key, preauth),
 		}
+		c.mu.Lock() // the goroutines that answer later read this table
+		c.sessions[h.sessionID] = sess
+		c.mu.Unlock()
 		c.logSession(h.sessionID, auth.user)
 		var done []byte
 		if c.spnego {
@@ -114,6 +121,45 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 	default:
 		return errorResponse(h, statusLogonFailure), nil
 	}
+}
+
+// logoff ends a session and everything that lives in it ([MS-SMB2] 3.3.5.6):
+// its handles are closed, its trees dropped, its pending operations ended. The
+// keys are wiped by wipeAfterReply, once the reply has been signed with them.
+func (c *conn) logoff(h header) []byte {
+	sid := h.sessionID
+	for _, of := range c.files {
+		if of.session == sid {
+			c.closeOpen(of)
+		}
+	}
+	for id, t := range c.trees {
+		if t.session == sid {
+			delete(c.trees, id)
+		}
+	}
+	c.mu.Lock()
+	var ended []*pendingOp
+	for key, op := range c.waiting {
+		if op.session == sid {
+			ended = append(ended, op)
+			delete(c.waiting, key)
+		}
+	}
+	delete(c.sessions, sid)
+	c.mu.Unlock()
+	for _, op := range ended {
+		op.stop()
+	}
+	return simpleResponse(h, statusSuccess, 4)
+}
+
+// wipe clears the key material this session owns. The AEADs of an encrypted
+// session keep their own expanded key schedules, which the standard library
+// gives no way to clear.
+func (s *session) wipe() {
+	clear(s.sessionKey)
+	clear(s.signingKey)
 }
 
 // logSession says, on the server's Logger at Debug level, what an

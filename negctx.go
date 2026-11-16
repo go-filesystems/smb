@@ -83,7 +83,10 @@ func parseNegotiateContexts(msg []byte, off, count int) (clientContexts, uint32)
 			}
 			n := int(binary.LittleEndian.Uint16(data[0:]))
 			salt := int(binary.LittleEndian.Uint16(data[2:]))
-			if 4+2*n+salt > len(data) {
+			// "This value MUST be greater than zero" (2.2.3.1.1): a list of no
+			// algorithms is malformed, which is not the same as a list that names
+			// none this server speaks (STATUS_SMB_NO_PREAUTH_INTEGRITY_HASH_OVERLAP).
+			if n == 0 || 4+2*n+salt > len(data) {
 				return cc, statusInvalidParameter
 			}
 			cc.hashes = readU16s(data[4:], n)

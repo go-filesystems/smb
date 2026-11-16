@@ -295,6 +295,19 @@ func (c *conn) closeFile(h header, body []byte) ([]byte, error) {
 	if of == nil {
 		return errorResponse(h, statusFileClosed), nil
 	}
+	c.closeOpen(of)
+
+	b := append(responseTo(h, statusSuccess), make([]byte, 60)...)
+	rb := b[headerLen:]
+	binary.LittleEndian.PutUint16(rb[0:], 60)
+	// Flags bit 0 means "the attributes below are filled in"; leaving it clear
+	// says they are not, which is honest for a handle that has just gone.
+	return b, nil
+}
+
+// closeOpen is everything that closing a handle does: CLOSE, and a LOGOFF that
+// takes the session's handles with it.
+func (c *conn) closeOpen(of *openFile) {
 	if of.f != nil {
 		of.f.Close()
 	}
@@ -318,13 +331,6 @@ func (c *conn) closeFile(h header, body []byte) ([]byte, error) {
 		}
 		of.share.notify(of.path, actionRemoved)
 	}
-
-	b := append(responseTo(h, statusSuccess), make([]byte, 60)...)
-	rb := b[headerLen:]
-	binary.LittleEndian.PutUint16(rb[0:], 60)
-	// Flags bit 0 means "the attributes below are filled in"; leaving it clear
-	// says they are not, which is honest for a handle that has just gone.
-	return b, nil
 }
 
 func (c *conn) read(h header, body []byte) ([]byte, error) {
