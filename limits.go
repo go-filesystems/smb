@@ -4,6 +4,7 @@ package smb
 
 import (
 	"log/slog"
+	"net"
 	"sync/atomic"
 	"time"
 )
@@ -97,7 +98,16 @@ func (s *Server) admit(c *conn) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	maxTotal, maxPre := s.maxConnections(), s.maxPreAuth()
-	if (maxTotal > 0 && len(s.conns) >= maxTotal) || (maxPre > 0 && s.preAuth >= maxPre) {
+	if c.nc != nil {
+		c.src = sourceKey(c.nc.RemoteAddr())
+	}
+	perSrc, perSrcPre := resolveLimit(s.MaxConnectionsPerSource, DefaultMaxConnectionsPerSource),
+		resolveLimit(s.MaxPreAuthPerSource, DefaultMaxPreAuthPerSource)
+	if s.srcTotal == nil {
+		s.srcTotal, s.srcPre = map[string]int{}, map[string]int{}
+	}
+	if (maxTotal > 0 && len(s.conns) >= maxTotal) || (maxPre > 0 && s.preAuth >= maxPre) ||
+		(perSrc > 0 && s.srcTotal[c.src] >= perSrc) || (perSrcPre > 0 && s.srcPre[c.src] >= perSrcPre) {
 		s.dropped++
 		first := !s.dropping
 		s.dropping = true
@@ -109,7 +119,46 @@ func (s *Server) admit(c *conn) bool {
 	s.dropping = false // somebody got in: the next refusal starts a new burst
 	s.conns[c] = struct{}{}
 	s.preAuth++
+	s.srcTotal[c.src]++
+	s.srcPre[c.src]++
+	c.inSrc = true
 	return true
+}
+
+// Per-source bounds: one address (an IPv6 /64) cannot take every slot. Defaults are
+// well under the global ones; a NAT or proxy in front of many clients raises them
+// (or a negative value switches them off).
+const (
+	DefaultMaxConnectionsPerSource = 32
+	DefaultMaxPreAuthPerSource     = 16
+)
+
+// sourceKey is the remote IP, an IPv6 address reduced to its /64.
+func sourceKey(a net.Addr) string {
+	if a == nil {
+		return ""
+	}
+	host := a.String()
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return host
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String()
+}
+
+func decr(m map[string]int, k string) {
+	if m == nil {
+		return
+	}
+	if m[k]--; m[k] <= 0 {
+		delete(m, k)
+	}
 }
 
 // logLimit says, once per burst of refusals, that the limit was reached.
@@ -142,6 +191,11 @@ func (s *Server) release(c *conn) {
 	delete(s.conns, c)
 	if c.counted.CompareAndSwap(true, false) {
 		s.preAuth--
+		decr(s.srcPre, c.src)
+	}
+	if c.inSrc {
+		c.inSrc = false
+		decr(s.srcTotal, c.src)
 	}
 }
 
@@ -157,6 +211,7 @@ func (c *conn) markAuthenticated() {
 	if c.counted.CompareAndSwap(true, false) {
 		c.srv.mu.Lock()
 		c.srv.preAuth--
+		decr(c.srv.srcPre, c.src)
 		c.srv.mu.Unlock()
 	}
 	c.touch()
@@ -178,9 +233,15 @@ func (c *conn) markUnauthenticated() {
 	}
 	if c.counted.CompareAndSwap(false, true) {
 		c.srv.mu.Lock()
-		over := c.srv.maxPreAuth() > 0 && c.srv.preAuth >= c.srv.maxPreAuth()
+		sp := resolveLimit(c.srv.MaxPreAuthPerSource, DefaultMaxPreAuthPerSource)
+		over := (c.srv.maxPreAuth() > 0 && c.srv.preAuth >= c.srv.maxPreAuth()) ||
+			(sp > 0 && c.srv.srcPre[c.src] >= sp)
 		if !over {
 			c.srv.preAuth++
+			if c.srv.srcPre == nil {
+				c.srv.srcPre = map[string]int{}
+			}
+			c.srv.srcPre[c.src]++
 		}
 		c.srv.mu.Unlock()
 		if over {
@@ -278,4 +339,6 @@ type connLimitState struct {
 	lastActive atomic.Int64 // UnixNano of the last frame
 	nOpen      atomic.Int64 // open handles, files and pipes
 	ended      atomic.Bool  // serve has returned: no clock may be armed
+	src        string       // the remote source, see sourceKey; set by admit
+	inSrc      bool         // counted in the per-source total; guarded by Server.mu
 }
