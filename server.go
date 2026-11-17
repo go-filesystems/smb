@@ -105,6 +105,16 @@ type Server struct {
 	// it is closed; zero means [DefaultPreAuthTimeout], a negative value never.
 	// Set it before the first connection.
 	PreAuthTimeout time.Duration
+	// MaxConnectionsPerSource and MaxPreAuthPerSource bound what one remote
+	// address (an IPv6 address by its /64) may hold, in all and with no
+	// authenticated session; zero means [DefaultMaxConnectionsPerSource] (32) and
+	// [DefaultMaxPreAuthPerSource] (16), a negative value no limit. One source
+	// flooding cannot lock out another. Raise them behind a NAT or a proxy, where
+	// many clients share an address. Loopback is not exempt. Set before the first
+	// connection.
+	MaxConnectionsPerSource int
+	MaxPreAuthPerSource     int
+	srcTotal, srcPre        map[string]int // guarded by mu
 	// IdleTimeout is how long an authenticated connection with no open handle and
 	// no operation pending may go without a request before it is closed; zero
 	// means [DefaultIdleTimeout], a negative value never. A connection whose last
