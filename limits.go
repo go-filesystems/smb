@@ -5,6 +5,7 @@ package smb
 import (
 	"log/slog"
 	"net"
+	"net/netip"
 	"sync/atomic"
 	"time"
 )
@@ -142,14 +143,18 @@ func sourceKey(a net.Addr) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	ip := net.ParseIP(host)
-	if ip == nil {
+	// netip, so a zone (fe80::1%en0) is understood and dropped: the zone names an
+	// interface of this host, not a different source.
+	ap, err := netip.ParseAddr(host)
+	if err != nil {
 		return host
 	}
-	if v4 := ip.To4(); v4 != nil {
-		return v4.String()
+	ap = ap.WithZone("").Unmap()
+	if ap.Is4() {
+		return ap.String()
 	}
-	return ip.Mask(net.CIDRMask(64, 128)).String()
+	pfx, _ := ap.Prefix(64)
+	return pfx.Addr().String()
 }
 
 func decr(m map[string]int, k string) {
