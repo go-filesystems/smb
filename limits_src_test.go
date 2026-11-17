@@ -19,6 +19,24 @@ func fromIP(s *Server, ip string) *conn {
 	return c
 }
 
+// A link-local address with a zone shares a key with its /64, zone or not; an IPv4
+// address mapped into IPv6 keys as the IPv4 address.
+func TestSourceKeyIgnoresTheZone(t *testing.T) {
+	zoned := func(host string) string { return sourceKey(strAddr(host + ":445")) }
+	a, b, c := zoned("[fe80::1%en0]"), zoned("[fe80::2%en1]"), zoned("[fe80::3]")
+	if a != b || b != c || a != "fe80::" {
+		t.Errorf("keys %q %q %q, want one shared fe80::", a, b, c)
+	}
+	if got := zoned("[::ffff:192.0.2.7]"); got != "192.0.2.7" {
+		t.Errorf("mapped IPv4: %q", got)
+	}
+}
+
+type strAddr string
+
+func (strAddr) Network() string  { return "tcp" }
+func (s strAddr) String() string { return string(s) }
+
 func TestSourceKey(t *testing.T) {
 	for in, want := range map[string]string{
 		"192.0.2.7:445":            "192.0.2.7",
