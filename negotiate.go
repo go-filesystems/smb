@@ -170,7 +170,7 @@ func chooseDialect(offered []uint16) uint16 {
 func (c *conn) negotiateResponse(h header, dialect uint16, ctxs []outContext) []byte {
 	// The security buffer says which authentication mechanisms exist. Offering
 	// exactly one, NTLM, is what makes the client's next message predictable.
-	sec := negTokenInitNTLM()
+	sec := negTokenInit(c.srv.Kerberos != nil, !c.srv.DisableNTLM)
 
 	const bodyLen = 64 // the fixed part; structure size says 65 for "and a buffer"
 	b := append(responseTo(h, statusSuccess), make([]byte, bodyLen+len(sec))...)
