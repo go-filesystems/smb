@@ -24,7 +24,9 @@
 // # What is implemented
 //
 // Dialects 2.1, 3.0, 3.0.2 and 3.1.1; NTLMv2 authentication over SPNEGO or
-// raw, as the client prefers; signing, with HMAC-SHA256, AES-CMAC or (on 3.1.1,
+// raw, as the client prefers, or Kerberos over SPNEGO through the [Acceptor] in
+// [Server.Kerberos] (with [Server.DisableNTLM] for a Kerberos-only server);
+// signing, with HMAC-SHA256, AES-CMAC or (on 3.1.1,
 // when the client offers it) AES-GMAC as the dialect requires; and the file
 // operations a file manager performs: opening, reading, writing, listing,
 // renaming, truncating and deleting.

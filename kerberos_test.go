@@ -6,6 +6,7 @@ import (
 	"encoding/asn1"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -114,12 +115,34 @@ type testAcceptor struct {
 
 	mu     sync.Mutex
 	tokens [][]byte
+	errs   []string
 }
 
 func (a *testAcceptor) Accept(token []byte) (*fssmb.Accepted, []byte, error) {
 	a.mu.Lock()
 	a.tokens = append(a.tokens, bytes.Clone(token))
 	a.mu.Unlock()
+	acc, rep, err := a.accept(token)
+	if err != nil {
+		a.mu.Lock()
+		a.errs = append(a.errs, err.Error())
+		a.mu.Unlock()
+	}
+	return acc, rep, err
+}
+
+// lastRefusal is why the acceptor last refused: a refusal test that only sees the
+// dial fail cannot tell the server's refusal from the client's own error.
+func (a *testAcceptor) lastRefusal() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.errs) == 0 {
+		return ""
+	}
+	return strings.ToLower(a.errs[len(a.errs)-1])
+}
+
+func (a *testAcceptor) accept(token []byte) (*fssmb.Accepted, []byte, error) {
 	var tok spnego.KRB5Token
 	if err := tok.Unmarshal(token); err != nil {
 		return nil, nil, err
@@ -313,6 +336,9 @@ func TestKerberosWrongServiceIsRefused(t *testing.T) {
 		s.Logoff()
 		t.Error("a ticket for another service was accepted")
 	}
+	if why := r.acc.lastRefusal(); !strings.Contains(why, "rejected") {
+		t.Errorf("the acceptor did not refuse it itself: %q", why)
+	}
 }
 
 // An expired ticket, a replayed one, and a token that is no AP-REQ.
@@ -329,6 +355,9 @@ func TestKerberosRefusals(t *testing.T) {
 		s.Logoff()
 		t.Error("an expired ticket was accepted")
 	}
+	if why := r.acc.lastRefusal(); !strings.Contains(why, "expired") {
+		t.Errorf("the acceptor did not refuse it as expired: %q", why)
+	}
 
 	// Replay: the AP-REQ a first connection used, sent again by a second.
 	good := &rawInit{inner: r.initiator(t, "alice")}
@@ -342,12 +371,18 @@ func TestKerberosRefusals(t *testing.T) {
 		s.Logoff()
 		t.Error("a replayed AP-REQ was accepted")
 	}
+	if why := r.acc.lastRefusal(); !strings.Contains(why, "replay") {
+		t.Errorf("the acceptor did not refuse it as a replay: %q", why)
+	}
 
 	// Not an AP-REQ at all: a Kerberos OID around garbage.
 	junk := &rawInit{inner: r.initiator(t, "alice"), replay: append([]byte{0x60, 0x0f, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02}, 0x01, 0x00, 0xff)}
 	if s, err := dialWith(t, r.addr, junk, 0); err == nil {
 		s.Logoff()
 		t.Error("garbage behind the Kerberos OID was accepted")
+	}
+	if why := r.acc.lastRefusal(); why == "" {
+		t.Error("the acceptor never saw the garbage")
 	}
 }
 

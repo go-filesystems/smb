@@ -845,10 +845,10 @@ func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]
 		// [MS-SMB2] 3.3.5.2.9: a session whose Kerberos ticket has run out (its
 		// ExpirationTime, 3.3.5.5.3 step 15) still processes LOGOFF, CLOSE and LOCK,
 		// and fails the rest with STATUS_NETWORK_SESSION_EXPIRED, on which the client
-		// authenticates again (a SESSION_SETUP, which comes before this).
+		// authenticates again: the SESSION_SETUP that does it must get through.
 		if sess != nil && !sess.expires.IsZero() && !time.Now().Before(sess.expires) {
 			switch h.command {
-			case cmdLogoff, cmdClose, cmdLock:
+			case cmdLogoff, cmdClose, cmdLock, cmdSessionSetup:
 			default:
 				c.logRefused(h, "the session's Kerberos ticket has expired")
 				return c.finish(out, prevAt, errorResponse(h, statusSessionExpired), sess, h), nil
