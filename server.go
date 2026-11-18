@@ -556,6 +556,15 @@ type session struct {
 	expires time.Time
 }
 
+// sessionEnded says the session's ticket has run out. expires is moved by a
+// renewal on one goroutine and read by every request on others, hence c.mu.
+func (c *conn) sessionEnded(s *session) bool {
+	c.mu.Lock()
+	e := s.expires
+	c.mu.Unlock()
+	return !e.IsZero() && !time.Now().Before(e)
+}
+
 func (c *conn) serve() {
 	defer c.nc.Close()
 	c.seq = newSeqWindow()
@@ -846,7 +855,7 @@ func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]
 		// ExpirationTime, 3.3.5.5.3 step 15) still processes LOGOFF, CLOSE and LOCK,
 		// and fails the rest with STATUS_NETWORK_SESSION_EXPIRED, on which the client
 		// authenticates again: the SESSION_SETUP that does it must get through.
-		if sess != nil && !sess.expires.IsZero() && !time.Now().Before(sess.expires) {
+		if sess != nil && c.sessionEnded(sess) {
 			switch h.command {
 			case cmdLogoff, cmdClose, cmdLock, cmdSessionSetup:
 			default:

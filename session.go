@@ -170,7 +170,7 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 		if ex.spnego {
 			done = negTokenRespAccept()
 		}
-		return c.establishSession(h, auth.user, key, preauth, time.Time{}, done)
+		return c.establishSession(h, auth.user, key, nil, preauth, time.Time{}, done)
 
 	default:
 		return errorResponse(h, statusLogonFailure), nil
@@ -182,7 +182,10 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 // the mechanism's last token ([MS-SMB2] 3.3.5.5.3: "the output token ... MUST be
 // returned in the response"), and expires is Session.ExpirationTime (step 15), or
 // the zero time for infinity.
-func (c *conn) establishSession(h header, user string, key, preauth []byte, expires time.Time, done []byte) ([]byte, error) {
+//
+// fullKey is Session.FullSessionKey, the whole GSS key, for 3.1.1 with an AES-256
+// cipher (step 11); nil where the mechanism has none longer than key (NTLM).
+func (c *conn) establishSession(h header, user string, key, fullKey, preauth []byte, expires time.Time, done []byte) ([]byte, error) {
 	sess := &session{
 		user:       user,
 		sessionKey: key,
@@ -193,7 +196,7 @@ func (c *conn) establishSession(h header, user string, key, preauth []byte, expi
 	// [MS-SMB2] 3.3.5.5.3 step 5: the client required it, or the server does.
 	sess.signingRequired = c.clientSecurityMode&signingRequired != 0 || c.srv.RequireSigning
 	if c.encCapable() {
-		enc, dec, err := c.deriveCipherKeys(key, preauth)
+		enc, dec, err := c.deriveCipherKeysFull(key, fullKey, preauth)
 		if err != nil {
 			return nil, err
 		}

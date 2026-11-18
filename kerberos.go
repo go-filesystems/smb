@@ -36,12 +36,23 @@ type Accepted struct {
 	// Principal is who the client proved to be, in full ("alice@EXAMPLE.ORG"), for
 	// the log.
 	Principal string
-	// Key is the GSS-API context key: the acceptor's subkey if the AP-REP carried
-	// one, else the initiator's authenticator subkey, else the ticket's session key
-	// (RFC 4121 section 2; [MS-KILE] 3.1.1.2 says the AP-REP's subkey is the
-	// session key when mutual authentication is requested). It is a secret; the server uses its first 16 bytes
-	// as Session.SessionKey ([MS-SMB2] 3.3.5.5.3 step 6, [MS-KILE] 3.1.1.2) and
-	// wipes its copy when the session ends.
+	// Key is the GSS-API context key, at least 16 bytes (a shorter one refuses the
+	// client). WHICH key matters, because the client derives its signing key from
+	// the same one and a different key signs fine here and fails every request there:
+	//
+	//   - mutual authentication requested (Windows always does): the acceptor's
+	//     subkey, the one the AP-REP carries. [MS-KILE] 3.1.1.2: "The subkey in the
+	//     EncAPRepPart of the KRB_AP_REP message ... is used as the session key
+	//     when MutualAuthentication is requested", and with AES "the subkeys are
+	//     different and the subkey in the KRB_AP_REP message is used" (not the
+	//     AP-REQ's). So an acceptor must put a subkey in its AP-REP and return it.
+	//   - otherwise: the initiator's authenticator subkey, else the ticket's
+	//     session key (RFC 4121 section 2).
+	//
+	// The server uses the first 16 bytes as Session.SessionKey and, on 3.1.1 with
+	// an AES-256 cipher, the whole key as Session.FullSessionKey ([MS-SMB2]
+	// 3.3.5.5.3 steps 6 and 11). It is a secret. The server copies it and wipes
+	// its copy; the slice stays yours, and wiping it is yours too.
 	Key []byte
 	// Expires is when the ticket stops being valid, or the zero time for never. The
 	// session then expires ([MS-SMB2] 3.3.5.5.3 step 15) and the client has to
@@ -82,8 +93,13 @@ func isKerberosToken(token []byte) bool {
 // withMech re-frames a GSS-API token with another mechanism OID.
 func withMech(rest, oid []byte) []byte { return derApp(0, append(derOID(oid), rest...)) }
 
-// sessionKey16 is Session.SessionKey: the first 16 bytes of the GSS key, zero
-// padded when it is shorter ([MS-SMB2] 3.3.5.5.3 step 6 and 3.3.1.8).
+// minContextKey is the shortest GSS key accepted: every Kerberos encryption type
+// that can carry SMB (AES128, AES256, RC4) has one of 16 bytes or more, and a
+// shorter one would be zero-padded into a weaker session key than the client's.
+const minContextKey = 16
+
+// sessionKey16 is Session.SessionKey: the first 16 bytes of the GSS key
+// ([MS-SMB2] 3.3.5.5.3 step 6 and 3.3.1.8). The caller has checked it has them.
 func sessionKey16(key []byte) []byte {
 	out := make([]byte, 16)
 	copy(out, key)
@@ -98,19 +114,43 @@ func (c *conn) sessionSetupKerberos(h header, msg, blob, token []byte, wrapped b
 		c.logRefused(h, "a Kerberos token, and no Kerberos acceptor is configured")
 		return errorResponse(h, statusLogonFailure), nil
 	}
+	// RFC 4178 section 3.2 (c) II and section 5: a token for a mechanism that is
+	// not the client's FIRST choice makes the mechListMIC exchange mandatory, and
+	// this server neither sends nor checks one. So a Kerberos token behind a list
+	// that starts with anything else (NTLMSSP, say: a client that prefers it and
+	// could be walked down to Kerberos, or the reverse) is refused rather than
+	// accepted unprotected. A bare token names no list and has no MIC to skip.
+	if wrapped {
+		if m := firstMechType(blob); !bytes.Equal(m, oidKRB5) && !bytes.Equal(m, oidMSKRB5) {
+			c.logRefused(h, "Kerberos token, but the client's first mechanism is not Kerberos (the mechListMIC would be required)")
+			return errorResponse(h, statusLogonFailure), nil
+		}
+	}
 	clientOID, rest, _ := krbToken(token)
 	got, apRep, err := acc.Accept(withMech(rest, oidKRB5))
-	if err != nil || got == nil || got.User == "" || len(got.Key) == 0 {
+	if err != nil || got == nil || got.User == "" || len(got.Key) < minContextKey {
 		// The same status whatever refused it: a stranger learns neither which
 		// principals exist nor which check failed. The reason goes to the log.
-		if err != nil {
+		switch {
+		case err != nil:
 			c.logRefused(h, "Kerberos: "+err.Error())
-		} else {
+		case got != nil && got.User != "" && len(got.Key) < minContextKey:
+			c.logRefused(h, "Kerberos: the acceptor returned a key shorter than 16 bytes")
+		default:
 			c.logRefused(h, "Kerberos: the acceptor returned no user or no key")
 		}
 		return errorResponse(h, statusLogonFailure), nil
 	}
-	defer clear(got.Key)
+	// The embedder owns got.Key: work on a copy, and wipe only that.
+	key := bytes.Clone(got.Key)
+	defer clear(key)
+	// A ticket that has already run out would make a session that is expired from
+	// birth ([MS-SMB2] 3.3.5.5.3 step 15 sets ExpirationTime from the GSS context,
+	// and every later request would answer SESSION_EXPIRED).
+	if !got.Expires.IsZero() && !time.Now().Before(got.Expires) {
+		c.logRefused(h, "Kerberos: the ticket has already expired")
+		return errorResponse(h, statusLogonFailure), nil
+	}
 	// The AP-REP goes back in the OID the client used.
 	var reply []byte
 	if len(apRep) > 0 {
@@ -121,14 +161,9 @@ func (c *conn) sessionSetupKerberos(h header, msg, blob, token []byte, wrapped b
 	}
 	var done []byte
 	if wrapped {
-		// supportedMech is the client's FIRST mechanism, which the token belongs to,
-		// when that is one of the Kerberos ones (see firstMechType); else the
-		// token's own OID.
-		mech := firstMechType(blob)
-		if !bytes.Equal(mech, oidKRB5) && !bytes.Equal(mech, oidMSKRB5) {
-			mech = clientOID
-		}
-		done = negTokenRespKerberos(mech, reply)
+		// supportedMech is the client's FIRST mechanism, which the token belongs to
+		// (checked above to be a Kerberos one; see firstMechType).
+		done = negTokenRespKerberos(firstMechType(blob), reply)
 	} else {
 		done = reply
 	}
@@ -139,7 +174,9 @@ func (c *conn) sessionSetupKerberos(h header, msg, blob, token []byte, wrapped b
 		if got.User != existing.user {
 			return errorResponse(h, statusAccessDenied), nil
 		}
+		c.mu.Lock() // the request loop reads it from other goroutines
 		existing.expires = got.Expires
+		c.mu.Unlock()
 		var flags uint16
 		if existing.encryptData {
 			flags |= sessionFlagEncryptData
@@ -170,5 +207,8 @@ func (c *conn) sessionSetupKerberos(h header, msg, blob, token []byte, wrapped b
 		// request, and the final response is signed with the key this produces.
 		preauth = preauthExtend(c.preauth, msg)
 	}
-	return c.establishSession(h, got.User, sessionKey16(got.Key), preauth, got.Expires, done)
+	// Session.SessionKey is the first 16 bytes; the whole key is Session.FullSessionKey,
+	// which 3.1.1 with an AES-256 cipher derives its encryption keys from
+	// ([MS-SMB2] 3.3.5.5.3 steps 6 and 11).
+	return c.establishSession(h, got.User, sessionKey16(key), key, preauth, got.Expires, done)
 }

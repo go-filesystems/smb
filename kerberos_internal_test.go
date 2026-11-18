@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -14,19 +15,26 @@ import (
 
 // stubAcceptor answers as told, and remembers what it was handed.
 type stubAcceptor struct {
-	acc  *Accepted
-	rep  []byte
-	err  error
+	acc   *Accepted
+	rep   []byte
+	err   error
+	alias bool // hand out the SAME Key slice every time, as an acceptor that caches one does
+
+	mu   sync.Mutex
 	seen [][]byte
 }
 
 func (s *stubAcceptor) Accept(tok []byte) (*Accepted, []byte, error) {
+	s.mu.Lock()
 	s.seen = append(s.seen, bytes.Clone(tok))
+	s.mu.Unlock()
 	if s.err != nil {
 		return nil, nil, s.err
 	}
 	a := *s.acc
-	a.Key = bytes.Clone(s.acc.Key)
+	if !s.alias {
+		a.Key = bytes.Clone(s.acc.Key)
+	}
 	return &a, s.rep, nil
 }
 
@@ -150,15 +158,39 @@ func TestTheAcceptorSeesTheStandardOIDAndTheClientGetsItsOwn(t *testing.T) {
 	}
 }
 
-// A short key is zero-padded to 16 bytes, as the specification has it.
-func TestSessionKeyIsFirst16BytesZeroPadded(t *testing.T) {
+// Session.SessionKey is the first 16 bytes of a longer key; a key of fewer than 16
+// is refused rather than zero-padded into a weaker session key than the client's
+// (blocker 3 of the review of #66).
+func TestSessionKeyIsFirst16BytesAndShorterIsRefused(t *testing.T) {
 	long := sessionKey16(bytes.Repeat([]byte{9}, 32))
-	short := sessionKey16([]byte{1, 2, 3})
 	if len(long) != 16 || !bytes.Equal(long, bytes.Repeat([]byte{9}, 16)) {
 		t.Errorf("long: % x", long)
 	}
-	if !bytes.Equal(short, append([]byte{1, 2, 3}, make([]byte, 13)...)) {
-		t.Errorf("short: % x", short)
+	for _, n := range []int{0, 1, 3, 15} {
+		r := requiringConn(t, dialect302)
+		delete(r.c.sessions, 1)
+		r.c.srv.Kerberos = &stubAcceptor{acc: &Accepted{User: "alice", Key: bytes.Repeat([]byte{7}, n)}, rep: ticketToken(oidKRB5)}
+		out, err := r.c.dispatchChain(r.setup(0, negInit(ticketToken(oidKRB5)), false))
+		if err != nil || statusOf(t, out) != statusLogonFailure || len(r.c.sessions) != 0 {
+			t.Errorf("a %d-byte key: %v %#x, %d sessions", n, err, statusOf(t, out), len(r.c.sessions))
+		}
+	}
+}
+
+// ⛔ The embedder owns Accepted.Key. The server used to `defer clear(got.Key)`,
+// wiping memory the acceptor still held (a cached or shared key); it works on a
+// copy now.
+func TestTheServerDoesNotWipeTheAcceptorsKey(t *testing.T) {
+	r := requiringConn(t, dialect302)
+	delete(r.c.sessions, 1)
+	key := bytes.Repeat([]byte{7}, 32)
+	r.c.srv.Kerberos = &stubAcceptor{acc: &Accepted{User: "alice", Key: key}, rep: ticketToken(oidKRB5), alias: true}
+	out, err := r.c.dispatchChain(r.setup(0, negInit(ticketToken(oidKRB5)), false))
+	if err != nil || statusOf(t, out) != statusSuccess {
+		t.Fatalf("%v %#x", err, statusOf(t, out))
+	}
+	if !bytes.Equal(key, bytes.Repeat([]byte{7}, 32)) {
+		t.Errorf("the acceptor's key was modified: % x", key)
 	}
 }
 
@@ -285,9 +317,6 @@ func TestTheAnswerNamesTheClientsFirstMechanism(t *testing.T) {
 	}{
 		{"Windows: MS-KRB5 first, token framed with the standard OID", [][]byte{oidMSKRB5, oidKRB5, oidNTLMSSP}, oidMSKRB5},
 		{"Kerberos first", [][]byte{oidKRB5, oidMSKRB5}, oidKRB5},
-		// A token under a first mechanism that is not Kerberos: the framing's OID is
-		// all there is to name.
-		{"NTLMSSP listed first", [][]byte{oidNTLMSSP, oidKRB5}, oidKRB5},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := requiringConn(t, dialect302)

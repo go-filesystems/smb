@@ -143,8 +143,20 @@ func (c *conn) sessionCipher() uint16 {
 // The key derivation key is the session key; NTLM has no longer one, so the
 // 256-bit ciphers take a 256-bit output of the same 128-bit input.
 func (c *conn) deriveCipherKeys(sessionKey, preauth []byte) (enc, dec cipher.AEAD, err error) {
+	return c.deriveCipherKeysFull(sessionKey, nil, preauth)
+}
+
+// deriveCipherKeysFull is deriveCipherKeys for a mechanism that has a key longer
+// than the 16 bytes of Session.SessionKey (Kerberos with AES256: 32). [MS-SMB2]
+// 3.3.5.5.3 step 11: "If Connection.Dialect is 3.1.1 and Connection.CipherId is
+// AES-256-CCM or AES-256-GCM, Session.FullSessionKey [is] the key derivation key.
+// Otherwise, Session.SessionKey". A nil fullKey is the session key itself.
+func (c *conn) deriveCipherKeysFull(sessionKey, fullKey, preauth []byte) (enc, dec cipher.AEAD, err error) {
 	id := c.sessionCipher()
 	bits := cipherKeyBits(id)
+	if c.dialect == dialect311 && bits == 256 && len(fullKey) > 0 {
+		sessionKey = fullKey
+	}
 	var ek, dk []byte
 	if c.dialect == dialect311 {
 		ek = kdf(sessionKey, "SMBS2CCipherKey\x00", string(preauth), bits)
