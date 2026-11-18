@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"time"
 )
 
 // sessionSetup runs the two halves of NTLM.
@@ -40,7 +41,8 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 	if err != nil {
 		return errorResponse(h, statusLogonFailure), nil
 	}
-	if len(token) < 12 {
+	krb := isKerberosToken(token)
+	if !krb && len(token) < 12 {
 		return errorResponse(h, statusLogonFailure), nil
 	}
 
@@ -60,6 +62,14 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 	// up a valid account could take the session over.
 	if existing != nil && h.flags&flagSigned == 0 && !h.encrypted {
 		return errorResponse(h, statusAccessDenied), nil
+	}
+
+	if krb {
+		return c.sessionSetupKerberos(h, msg, body[secOff:secOff+secLen], token, wrapped, existing)
+	}
+	if c.srv.DisableNTLM {
+		c.logRefused(h, "NTLMSSP, and the server has NTLM disabled")
+		return errorResponse(h, statusLogonFailure), nil
 	}
 
 	switch binary.LittleEndian.Uint32(token[8:]) {
@@ -156,46 +166,59 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 			// response, which they sign, is not.
 			preauth = preauthExtend(ex.preauth, msg)
 		}
-		sess := &session{
-			user:       auth.user,
-			sessionKey: key,
-			signingKey: signingKeyFor(c.dialect, key, preauth),
-		}
-		var flags uint16
-		// [MS-SMB2] 3.3.5.5.3 step 5: the client required it, or the server does.
-		sess.signingRequired = c.clientSecurityMode&signingRequired != 0 || c.srv.RequireSigning
-		if c.encCapable() {
-			enc, dec, err := c.deriveCipherKeys(key, preauth)
-			if err != nil {
-				return nil, err
-			}
-			sess.crypto = &sessionCrypto{enc: enc, dec: dec, cipher: c.sessionCipher()}
-			// [MS-SMB2] 3.3.5.5.3 step 10: with EncryptData the session says so,
-			// and from then on a request must come encrypted.
-			if c.srv.EncryptData {
-				sess.encryptData = true
-				flags |= sessionFlagEncryptData
-			}
-		}
-		c.mu.Lock() // the goroutines that answer later read this table
-		c.sessions[h.sessionID] = sess
-		c.mu.Unlock()
-		c.markAuthenticated()
-		c.logSession(h.sessionID, auth.user, sess)
 		var done []byte
 		if ex.spnego {
 			done = negTokenRespAccept()
 		}
-		// The last message of the authentication is signed even though the
-		// request was not: it is the first thing a client can check, and it
-		// is what proves the server holds the same key.
-		reply := c.sessionSetupResponse(h, statusSuccess, flags, done)
-		signMessage(c.signAlgo(), c.sessions[h.sessionID].signingKey, reply)
-		return reply, nil
+		return c.establishSession(h, auth.user, key, nil, preauth, time.Time{}, done)
 
 	default:
 		return errorResponse(h, statusLogonFailure), nil
 	}
+}
+
+// establishSession is the end of an authentication, whichever mechanism it was:
+// the session exists from here, keyed by the key the mechanism produced. done is
+// the mechanism's last token ([MS-SMB2] 3.3.5.5.3: "the output token ... MUST be
+// returned in the response"), and expires is Session.ExpirationTime (step 15), or
+// the zero time for infinity.
+//
+// fullKey is Session.FullSessionKey, the whole GSS key, for 3.1.1 with an AES-256
+// cipher (step 11); nil where the mechanism has none longer than key (NTLM).
+func (c *conn) establishSession(h header, user string, key, fullKey, preauth []byte, expires time.Time, done []byte) ([]byte, error) {
+	sess := &session{
+		user:       user,
+		sessionKey: key,
+		signingKey: signingKeyFor(c.dialect, key, preauth),
+		expires:    expires,
+	}
+	var flags uint16
+	// [MS-SMB2] 3.3.5.5.3 step 5: the client required it, or the server does.
+	sess.signingRequired = c.clientSecurityMode&signingRequired != 0 || c.srv.RequireSigning
+	if c.encCapable() {
+		enc, dec, err := c.deriveCipherKeysFull(key, fullKey, preauth)
+		if err != nil {
+			return nil, err
+		}
+		sess.crypto = &sessionCrypto{enc: enc, dec: dec, cipher: c.sessionCipher()}
+		// [MS-SMB2] 3.3.5.5.3 step 10: with EncryptData the session says so,
+		// and from then on a request must come encrypted.
+		if c.srv.EncryptData {
+			sess.encryptData = true
+			flags |= sessionFlagEncryptData
+		}
+	}
+	c.mu.Lock() // the goroutines that answer later read this table
+	c.sessions[h.sessionID] = sess
+	c.mu.Unlock()
+	c.markAuthenticated()
+	c.logSession(h.sessionID, user, sess)
+	// The last message of the authentication is signed even though the
+	// request was not: it is the first thing a client can check, and it
+	// is what proves the server holds the same key.
+	reply := c.sessionSetupResponse(h, statusSuccess, flags, done)
+	signMessage(c.signAlgo(), sess.signingKey, reply)
+	return reply, nil
 }
 
 // An exchange is one authentication in progress: the challenge that was sent, how

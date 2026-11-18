@@ -82,6 +82,7 @@ and the **two traps** that make this hard to do at all.
 |---|---|
 | dialect negotiation | including the 1996 greeting a modern client still opens with |
 | NTLMv2 over SPNEGO | the password never leaves the server |
+| Kerberos over SPNEGO | MS-KRB5 and Kerberos V5, through an `Acceptor` you provide (see below); the session key is the first 16 bytes of the context key, the whole key for AES-256 encryption on 3.1.1; a session ends with its ticket; `Server.DisableNTLM` makes the server Kerberos-only |
 | opening, reading, writing | positional through `Opener`/`WritableFile`, whole-file where a driver has neither |
 | timestamps | a driver with `filesystem.TimesReader` reports its own creation, access, write and change times, in FileBasicInformation, FileNetworkOpenInformation, the directory classes and CREATE; a time the format does not keep (FAT has no change time) is `0`, "not specified" in MS-FSCC, never NOW. A driver without the capability still answers NOW for all four. Setting times (`touch -d`, `cp -p`, robocopy `/COPY:T`): `SET_INFO` FileBasicInformation maps LastAccessTime and LastWriteTime to `MetadataSetter.Chtimes` (the other one is read back through `TimesReader` so it is not clobbered); 0 keeps; -1 freezes the time on that handle (writes, resizes and the close put it back) and -2 resumes (MS-FSCC 2.4.7); below -2 is `STATUS_INVALID_PARAMETER`. A time that cannot be stored (a CreationTime, which the interface has no setter for; a ChangeTime on its own, since it is the server's clock and `Chtimes` refreshes it to now; an access or write time on a driver without `Chtimes`) follows the share's `smb.UnstorableTimes(policy)` option: `smb.TimesIgnore` (the zero value and default) answers success and drops it, as Samba does, so Explorer and `robocopy /COPY:T` copies keep working; `smb.TimesRefuse` answers `STATUS_NOT_SUPPORTED` and applies nothing in the request; `smb.TimesLog` ignores and writes one structured `slog` line (share, path, fields; path quoted and escaped) to `Server.Logger` (default `slog.Default()`). A value equal to what the driver reports is nothing to store. `-1` on a driver with `Chtimes` but no `TimesReader` is always `STATUS_NOT_SUPPORTED`: that is a capability gap. FileAttributes are still accepted and dropped |
 | listing, renaming, truncating, deleting | including the chained requests macOS sends on every open, and the ones Windows sends whose FIRST operation is meant to fail |
@@ -227,6 +228,57 @@ return srv.ListenAndServe("127.0.0.1:4445")
 Port 445 is the one a client dials without being told, and it needs privilege
 on every operating system — so the examples use a high port, and the mount
 command names it.
+
+### Kerberos, with no password
+
+A client that holds a Kerberos ticket (a Windows machine that is not in a domain
+but has a ticket from your realm, a Linux box with `sec=krb5`) can log in without
+a password if the server accepts Kerberos in SPNEGO. Set `Server.Kerberos` to an
+`smb.Acceptor`, which this module leaves to you so that it keeps its one
+dependency:
+
+```go
+type Acceptor interface {
+	Accept(token []byte) (*smb.Accepted, []byte, error)
+}
+```
+
+`Accept` gets the RFC 4121 token that carries the AP-REQ (always framed with the
+standard Kerberos OID: Windows frames it with the Microsoft one,
+1.2.840.48018.1.2.2, and the server converts), and returns who the client is
+(`Accepted.User`, the name your `allow` and `writers` lists see; mapping a
+principal to it is your decision, and an unknown principal is an error, never a
+default), the AP-REP to send back, the context key, and when the ticket ends. The
+replay cache is the acceptor's. With a keytab and go-authn/krb5 or gokrb5 it is
+about forty lines; `kerberos_test.go` has one over gokrb5.
+
+The NEGOTIATE response then lists MS-KRB5, Kerberos V5, and NTLMSSP, in that
+order, so a Windows client picks Kerberos. The first 16 bytes of the context key
+are `Session.SessionKey` ([MS-SMB2] 3.3.5.5.3 step 6; [MS-KILE] 3.1.1.2), from
+which the signing key and the 128-bit ciphers' keys derive. On 3.1.1 with
+AES-256-CCM or AES-256-GCM the encryption keys derive from the **whole** context
+key, `Session.FullSessionKey` (32 bytes for AES256 Kerberos; step 11), which NTLM
+does not have, so the two differ there. A key shorter than 16 bytes, or one for a
+ticket that has already expired, refuses the client. The key must be the AP-REP's
+subkey when mutual authentication is requested ([MS-KILE] 3.1.1.2; see
+`Accepted.Key`). A session ends when its
+ticket does: every command but LOGOFF, CLOSE and LOCK then answers
+`STATUS_NETWORK_SESSION_EXPIRED` (3.3.5.2.9) until the client authenticates
+again, which a Kerberos client does by itself.
+
+`Server.DisableNTLM = true` makes the server Kerberos-only: NTLMSSP is not offered
+and is refused if sent, and `Serve` returns `smb.ErrNeedKerberos` when there is no
+acceptor, so the mistake shows at start-up rather than as every client's logon
+failure. Users added with `AddUser` are then of no use: a password is only ever
+checked by NTLM.
+
+The `mechListMIC` of RFC 4178 section 5 is neither checked nor sent. It is
+optional only when the mechanism is the client's first choice (section 3.2 (c) II
+and section 5), so a Kerberos token behind a mechanism list that does not start
+with MS-KRB5 or Kerberos V5 (NTLMSSP first, say) is refused with
+`STATUS_LOGON_FAILURE`, without the acceptor seeing it; a Windows client lists
+MS-KRB5 first. NTLMSSP does not check the MIC either; that is a separate
+defect (go-filesystems/smb#67), not something this section fixes. IAKerb and PKU2U are not offered.
 
 ### The size a client is told
 

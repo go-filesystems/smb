@@ -20,6 +20,11 @@ import (
 var (
 	oidSPNEGO  = []byte{0x2b, 0x06, 0x01, 0x05, 0x05, 0x02}                         // 1.3.6.1.5.5.2
 	oidNTLMSSP = []byte{0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a} // 1.3.6.1.4.1.311.2.2.10
+	// The two Kerberos mechanisms. The token behind either is the same RFC 4121
+	// section 4.1 framing; only the OID differs, and Windows sends the Microsoft
+	// one ([MS-KILE] 1.7, [MS-SPNG]).
+	oidKRB5   = []byte{0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02} // 1.2.840.113554.1.2.2
+	oidMSKRB5 = []byte{0x2a, 0x86, 0x48, 0x82, 0xf7, 0x12, 0x01, 0x02, 0x02} // 1.2.840.48018.1.2.2
 )
 
 // errNotSPNEGO says the blob is not a token this server can read. A caller
@@ -30,10 +35,85 @@ var errNotSPNEGO = errors.New("smb: not an SPNEGO token this server understands"
 // puts in its NEGOTIATE response. Offering exactly one mechanism is what makes
 // the client's reply predictable: it echoes the list back and picks the only
 // entry.
-func negTokenInitNTLM() []byte {
-	mechList := derSeq(derOID(oidNTLMSSP))
-	init := derCtx(0, derSeq(derCtx(0, mechList)))
+func negTokenInitNTLM() []byte { return negTokenInit(false, true) }
+
+// negTokenInit is the NegTokenInit of the NEGOTIATE response (RFC 4178 4.2.1):
+// the mechanisms this server accepts, most preferred first. With Kerberos the
+// list is MS-KRB5 then Kerberos V5, the order a Windows client offers them in
+// ([MS-KILE] 1.7), so the one it picks is the first of both lists and RFC 4178
+// section 5 makes the mechListMIC exchange optional; NTLMSSP follows unless it
+// is turned off.
+func negTokenInit(kerberos, ntlm bool) []byte {
+	var list []byte
+	if kerberos {
+		list = append(list, derOID(oidMSKRB5)...)
+		list = append(list, derOID(oidKRB5)...)
+	}
+	if ntlm {
+		list = append(list, derOID(oidNTLMSSP)...)
+	}
+	init := derCtx(0, derSeq(derCtx(0, derSeq(list))))
 	return derApp(0, append(derOID(oidSPNEGO), init...))
+}
+
+// firstMechType is the first mechanism a NegTokenInit lists, or nil if the blob
+// is not one. RFC 4178 section 4.2.1: the optimistic mechToken a NegTokenInit
+// carries is for THAT mechanism, whatever OID its own framing wears -- a Windows
+// client lists MS-KRB5 first and frames its AP-REQ with the standard Kerberos OID
+// (measured: go-authn-kerb-spike, tap.log), and an answer naming the framing's OID
+// instead names a mechanism that is not the client's first choice, which makes
+// the mechListMIC exchange mandatory (section 5) and gets the reply refused.
+func firstMechType(blob []byte) []byte {
+	if len(blob) == 0 || blob[0] != 0x60 {
+		return nil
+	}
+	body, err := derUnwrap(blob, 0x60)
+	if err != nil {
+		return nil
+	}
+	if _, body, err = derSplit(body, 0x06); err != nil { // the SPNEGO OID
+		return nil
+	}
+	inner, err := derUnwrap(body, 0xA0) // [0] NegTokenInit
+	if err != nil {
+		return nil
+	}
+	seq, err := derUnwrap(inner, 0x30)
+	if err != nil {
+		return nil
+	}
+	for len(seq) > 0 {
+		tag := seq[0]
+		content, rest, err := derSplit(seq, tag)
+		if err != nil {
+			return nil
+		}
+		if tag == 0xA0 { // mechTypes
+			list, err := derUnwrap(content, 0x30)
+			if err != nil {
+				return nil
+			}
+			oid, _, err := derSplit(list, 0x06)
+			if err != nil {
+				return nil
+			}
+			return oid
+		}
+		seq = rest
+	}
+	return nil
+}
+
+// negTokenRespKerberos is the acceptor's answer to a Kerberos token (RFC 4178
+// 4.2.2): accept-completed, the mechanism it chose, and the AP-REP if the
+// client asked for mutual authentication. Kerberos is one round trip, so the
+// negotiation is over with this message.
+func negTokenRespKerberos(mech, apRep []byte) []byte {
+	b := append(derCtx(0, derEnum(0)), derCtx(1, derOID(mech))...)
+	if len(apRep) > 0 {
+		b = append(b, derCtx(2, derOctet(apRep))...)
+	}
+	return derCtx(1, derSeq(b))
 }
 
 // negTokenRespChallenge wraps the NTLM challenge the server sends back:
@@ -75,6 +155,9 @@ func mechTokenOf(blob []byte) (token []byte, wrapped bool, err error) {
 		oid, rest, err := derSplit(body, 0x06)
 		if err != nil {
 			return nil, false, err
+		}
+		if bytes.Equal(oid, oidKRB5) || bytes.Equal(oid, oidMSKRB5) {
+			return blob, false, nil // a Kerberos token with no SPNEGO around it
 		}
 		if !bytes.Equal(oid, oidSPNEGO) {
 			return nil, false, fmt.Errorf("%w: the mechanism is not SPNEGO", errNotSPNEGO)

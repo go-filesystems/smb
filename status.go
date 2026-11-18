@@ -32,6 +32,7 @@ const (
 	statusDirectoryNotEmpty    uint32 = 0xC0000101
 	statusNotSupported         uint32 = 0xC00000BB
 	statusUserSessionDeleted   uint32 = 0xC0000203
+	statusSessionExpired       uint32 = 0xC000035C // STATUS_NETWORK_SESSION_EXPIRED
 	statusNetworkNameDeleted   uint32 = 0xC00000C9
 	statusInvalidDeviceRequest uint32 = 0xC0000010
 	statusDiskFull             uint32 = 0xC000007F

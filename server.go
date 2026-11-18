@@ -46,6 +46,16 @@ type Server struct {
 	// one-request-at-a-time server of v0.7 and before. Set it before the first
 	// connection.
 	MaxInFlight int
+	// Kerberos, when set, makes the server accept Kerberos in SPNEGO: it offers
+	// MS-KRB5 and Kerberos V5 ahead of NTLMSSP, and hands the AP-REQ to the
+	// acceptor. See [Acceptor]. Set it before the first connection.
+	Kerberos Acceptor
+	// DisableNTLM refuses NTLMSSP: the NEGOTIATE response does not offer it and a
+	// client that sends it anyway is answered STATUS_LOGON_FAILURE. It needs
+	// [Server.Kerberos], and [Server.Serve] returns [ErrNeedKerberos] without it.
+	// The users added with [Server.AddUser] have no use then, since a password is
+	// only ever checked by NTLM. Set it before the first connection.
+	DisableNTLM bool
 	// Logger receives the [TimesLog] lines. Nil means slog.Default(). (The
 	// server had no logger before; this is its first.) Set it before the first
 	// connection.
@@ -371,6 +381,9 @@ func (s *Server) serverName() string {
 
 // Serve accepts connections until the listener is closed.
 func (s *Server) Serve(ln net.Listener) error {
+	if s.DisableNTLM && s.Kerberos == nil {
+		return ErrNeedKerberos
+	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -537,6 +550,19 @@ type session struct {
 	// client said, in its NEGOTIATE, that it requires signing. From then on a
 	// request that arrives neither signed nor encrypted is refused.
 	signingRequired bool
+	// expires is Session.ExpirationTime ([MS-SMB2] 3.3.5.5.3 step 15): the end of
+	// the Kerberos ticket the session was authenticated with. The zero time is
+	// infinity, which is what NTLM gives.
+	expires time.Time
+}
+
+// sessionEnded says the session's ticket has run out. expires is moved by a
+// renewal on one goroutine and read by every request on others, hence c.mu.
+func (c *conn) sessionEnded(s *session) bool {
+	c.mu.Lock()
+	e := s.expires
+	c.mu.Unlock()
+	return !e.IsZero() && !time.Now().Before(e)
 }
 
 func (c *conn) serve() {
@@ -824,6 +850,18 @@ func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]
 		// session to hold it to anything: not its signature, not its encryption.
 		if sess == nil && commandNeedsSession(h.command) {
 			return c.finish(out, prevAt, errorResponse(h, statusUserSessionDeleted), nil, h), nil
+		}
+		// [MS-SMB2] 3.3.5.2.9: a session whose Kerberos ticket has run out (its
+		// ExpirationTime, 3.3.5.5.3 step 15) still processes LOGOFF, CLOSE and LOCK,
+		// and fails the rest with STATUS_NETWORK_SESSION_EXPIRED, on which the client
+		// authenticates again: the SESSION_SETUP that does it must get through.
+		if sess != nil && c.sessionEnded(sess) {
+			switch h.command {
+			case cmdLogoff, cmdClose, cmdLock, cmdSessionSetup:
+			default:
+				c.logRefused(h, "the session's Kerberos ticket has expired")
+				return c.finish(out, prevAt, errorResponse(h, statusSessionExpired), sess, h), nil
+			}
 		}
 		signed := h.flags&flagSigned != 0 && !encrypted
 		// [MS-SMB2] 3.3.5.2.4: "the server MUST determine if the client failed to
