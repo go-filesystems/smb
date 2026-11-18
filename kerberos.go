@@ -92,7 +92,7 @@ func sessionKey16(key []byte) []byte {
 
 // sessionSetupKerberos is SESSION_SETUP with a Kerberos mechanism token: one
 // round trip, so the answer is final. msg is the whole request (3.1.1 hashes it).
-func (c *conn) sessionSetupKerberos(h header, msg, token []byte, wrapped bool, existing *session) ([]byte, error) {
+func (c *conn) sessionSetupKerberos(h header, msg, blob, token []byte, wrapped bool, existing *session) ([]byte, error) {
 	acc := c.srv.Kerberos
 	if acc == nil {
 		c.logRefused(h, "a Kerberos token, and no Kerberos acceptor is configured")
@@ -121,7 +121,14 @@ func (c *conn) sessionSetupKerberos(h header, msg, token []byte, wrapped bool, e
 	}
 	var done []byte
 	if wrapped {
-		done = negTokenRespKerberos(clientOID, reply)
+		// supportedMech is the client's FIRST mechanism, which the token belongs to,
+		// when that is one of the Kerberos ones (see firstMechType); else the
+		// token's own OID.
+		mech := firstMechType(blob)
+		if !bytes.Equal(mech, oidKRB5) && !bytes.Equal(mech, oidMSKRB5) {
+			mech = clientOID
+		}
+		done = negTokenRespKerberos(mech, reply)
 	} else {
 		done = reply
 	}

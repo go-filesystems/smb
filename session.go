@@ -65,7 +65,7 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 	}
 
 	if krb {
-		return c.sessionSetupKerberos(h, msg, token, wrapped, existing)
+		return c.sessionSetupKerberos(h, msg, body[secOff:secOff+secLen], token, wrapped, existing)
 	}
 	if c.srv.DisableNTLM {
 		c.logRefused(h, "NTLMSSP, and the server has NTLM disabled")

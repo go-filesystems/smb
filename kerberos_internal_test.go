@@ -35,8 +35,15 @@ func (s *stubAcceptor) Accept(tok []byte) (*Accepted, []byte, error) {
 func ticketToken(oid []byte) []byte { return withMech([]byte{0x01, 0x00, 0xff}, oid) }
 
 // negInit wraps a mechanism token the way a client's first SESSION_SETUP does.
-func negInit(tok []byte) []byte {
-	init := derCtx(0, derSeq(derCtx(2, derOctet(tok))))
+func negInit(tok []byte) []byte { return negInitMechs(tok, oidMSKRB5, oidKRB5) }
+
+// negInitMechs is the same with the mechanisms the client lists, in its order.
+func negInitMechs(tok []byte, mechs ...[]byte) []byte {
+	var list []byte
+	for _, m := range mechs {
+		list = append(list, derOID(m)...)
+	}
+	init := derCtx(0, derSeq(append(derCtx(0, derSeq(list)), derCtx(2, derOctet(tok))...)))
 	return derApp(0, append(derOID(oidSPNEGO), init...))
 }
 
@@ -101,6 +108,9 @@ func TestTheAcceptorSeesTheStandardOIDAndTheClientGetsItsOwn(t *testing.T) {
 		oid     []byte
 		wrapped bool
 	}{{"MS-KRB5 in SPNEGO", oidMSKRB5, true}, {"Kerberos in SPNEGO", oidKRB5, true}, {"Kerberos bare", oidKRB5, false}} {
+		// A Windows client lists MS-KRB5 first and frames its token with the
+		// standard OID: the answer names the FIRST mechanism, the one the token is
+		// for, not the token's framing (see TestTheAnswerNamesTheClientsFirstMechanism).
 		t.Run(tc.name, func(t *testing.T) {
 			r := requiringConn(t, dialect302)
 			delete(r.c.sessions, 1)
@@ -123,8 +133,8 @@ func TestTheAcceptorSeesTheStandardOIDAndTheClientGetsItsOwn(t *testing.T) {
 				if !bytes.Contains(sec, want) || !bytes.Contains(sec, derCtx(0, derEnum(0))) {
 					t.Errorf("the SPNEGO answer does not hold the AP-REP in the client's OID, accept-completed: % x", sec)
 				}
-				if !bytes.Contains(sec, derCtx(1, derOID(tc.oid))) {
-					t.Error("the answer does not name the mechanism it chose")
+				if !bytes.Contains(sec, derCtx(1, derOID(oidMSKRB5))) {
+					t.Error("the answer does not name the client's first mechanism (MS-KRB5)")
 				}
 			} else if !bytes.Equal(sec, want) {
 				t.Errorf("a bare client got % x, want % x", sec, want)
@@ -257,5 +267,42 @@ func TestAZeroExpiryNeverExpires(t *testing.T) {
 	out, _ := r.c.dispatchChain(r.signed(cmdFlush, make([]byte, 64)))
 	if statusOf(t, out) == statusSessionExpired {
 		t.Error("a session with no expiry expired")
+	}
+}
+
+// ⛔ Measured against Windows 11 (go-authn-kerb-spike, tap.log): the client lists
+// MS-KRB5 first, then Kerberos V5, then NTLMSSP, and frames its AP-REQ with the
+// STANDARD Kerberos OID. The answer's supportedMech must be the first mechanism
+// listed (RFC 4178 section 4.2.1: the optimistic token is for it), not the OID
+// the token is framed with: naming another mechanism makes the mechListMIC
+// exchange mandatory (section 5), and Windows dropped the connection after the
+// SESSION_SETUP response, four times, with "network name cannot be found".
+func TestTheAnswerNamesTheClientsFirstMechanism(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		mechs [][]byte
+		want  []byte
+	}{
+		{"Windows: MS-KRB5 first, token framed with the standard OID", [][]byte{oidMSKRB5, oidKRB5, oidNTLMSSP}, oidMSKRB5},
+		{"Kerberos first", [][]byte{oidKRB5, oidMSKRB5}, oidKRB5},
+		// A token under a first mechanism that is not Kerberos: the framing's OID is
+		// all there is to name.
+		{"NTLMSSP listed first", [][]byte{oidNTLMSSP, oidKRB5}, oidKRB5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := requiringConn(t, dialect302)
+			delete(r.c.sessions, 1)
+			r.c.srv.Kerberos = &stubAcceptor{acc: &Accepted{User: "alice", Key: bytes.Repeat([]byte{7}, 16)}, rep: ticketToken(oidKRB5)}
+			out, err := r.c.dispatchChain(r.setup(0, negInitMechs(ticketToken(oidKRB5), tc.mechs...), false))
+			if err != nil || statusOf(t, out) != statusSuccess {
+				t.Fatalf("%v %#x", err, statusOf(t, out))
+			}
+			if sec := securityBuffer(t, out); !bytes.Contains(sec, derCtx(1, derOID(tc.want))) {
+				t.Errorf("supportedMech is not % x: % x", tc.want, sec)
+			}
+		})
+	}
+	if firstMechType(nil) != nil || firstMechType([]byte{0x60, 0x03, 0x06, 0x01}) != nil || firstMechType(ticketToken(oidKRB5)) != nil {
+		t.Error("firstMechType invented a mechanism")
 	}
 }

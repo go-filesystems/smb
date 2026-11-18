@@ -56,6 +56,54 @@ func negTokenInit(kerberos, ntlm bool) []byte {
 	return derApp(0, append(derOID(oidSPNEGO), init...))
 }
 
+// firstMechType is the first mechanism a NegTokenInit lists, or nil if the blob
+// is not one. RFC 4178 section 4.2.1: the optimistic mechToken a NegTokenInit
+// carries is for THAT mechanism, whatever OID its own framing wears -- a Windows
+// client lists MS-KRB5 first and frames its AP-REQ with the standard Kerberos OID
+// (measured: go-authn-kerb-spike, tap.log), and an answer naming the framing's OID
+// instead names a mechanism that is not the client's first choice, which makes
+// the mechListMIC exchange mandatory (section 5) and gets the reply refused.
+func firstMechType(blob []byte) []byte {
+	if len(blob) == 0 || blob[0] != 0x60 {
+		return nil
+	}
+	body, err := derUnwrap(blob, 0x60)
+	if err != nil {
+		return nil
+	}
+	if _, body, err = derSplit(body, 0x06); err != nil { // the SPNEGO OID
+		return nil
+	}
+	inner, err := derUnwrap(body, 0xA0) // [0] NegTokenInit
+	if err != nil {
+		return nil
+	}
+	seq, err := derUnwrap(inner, 0x30)
+	if err != nil {
+		return nil
+	}
+	for len(seq) > 0 {
+		tag := seq[0]
+		content, rest, err := derSplit(seq, tag)
+		if err != nil {
+			return nil
+		}
+		if tag == 0xA0 { // mechTypes
+			list, err := derUnwrap(content, 0x30)
+			if err != nil {
+				return nil
+			}
+			oid, _, err := derSplit(list, 0x06)
+			if err != nil {
+				return nil
+			}
+			return oid
+		}
+		seq = rest
+	}
+	return nil
+}
+
 // negTokenRespKerberos is the acceptor's answer to a Kerberos token (RFC 4178
 // 4.2.2): accept-completed, the mechanism it chose, and the AP-REP if the
 // client asked for mutual authentication. Kerberos is one round trip, so the
