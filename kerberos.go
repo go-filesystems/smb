@@ -38,7 +38,8 @@ type Accepted struct {
 	Principal string
 	// Key is the GSS-API context key: the acceptor's subkey if the AP-REP carried
 	// one, else the initiator's authenticator subkey, else the ticket's session key
-	// (RFC 4121 section 4.2.2). It is a secret; the server uses its first 16 bytes
+	// (RFC 4121 section 2; [MS-KILE] 3.1.1.2 says the AP-REP's subkey is the
+	// session key when mutual authentication is requested). It is a secret; the server uses its first 16 bytes
 	// as Session.SessionKey ([MS-SMB2] 3.3.5.5.3 step 6, [MS-KILE] 3.1.1.2) and
 	// wipes its copy when the session ends.
 	Key []byte

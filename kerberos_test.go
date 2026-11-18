@@ -106,7 +106,7 @@ func krbClient(t *testing.T, who string, tkt messages.Ticket, key types.Encrypti
 
 // testAcceptor is the keytab-backed Acceptor an embedder writes, over gokrb5. It
 // answers with an AP-REP carrying an acceptor subkey, as MIT and Heimdal do, and
-// returns that subkey as the context key (RFC 4121 section 4.2.2).
+// returns that subkey as the context key (RFC 4121 section 2: the acceptor's subkey if it asserts one).
 type testAcceptor struct {
 	kt    *keytab.Keytab
 	spn   string
