@@ -123,7 +123,7 @@ func (c *conn) changeNotify(h header, body []byte) ([]byte, error) {
 	}
 	flags := binary.LittleEndian.Uint16(body[2:])
 	outMax := int(binary.LittleEndian.Uint32(body[4:]))
-	of := c.fileByID(body[8:])
+	of := c.fileByID(h, body[8:])
 	if of == nil {
 		return errorResponse(h, statusFileClosed), nil
 	}

@@ -129,7 +129,7 @@ func (c *conn) lock(h header, body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("smb: LOCK body of %d bytes is too short", len(body))
 	}
 	count := int(binary.LittleEndian.Uint16(body[2:]))
-	of := c.fileByID(body[8:])
+	of := c.fileByID(h, body[8:])
 	if of == nil {
 		return errorResponse(h, statusFileClosed), nil
 	}

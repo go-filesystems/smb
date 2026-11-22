@@ -87,7 +87,7 @@ func (c *conn) ioctl(h header, body []byte, msg []byte) ([]byte, error) {
 		// call is made over a pipe: the call goes in the input, the reply
 		// comes back in the output. It is the only way `smbutil view` and the
 		// Finder ask what shares there are.
-		of := c.fileByID(body[8:])
+		of := c.fileByID(h, body[8:])
 		if of == nil || of.pipe == nil {
 			return errorResponse(h, statusFileClosed), nil
 		}
@@ -112,14 +112,14 @@ func (c *conn) ioctl(h header, body []byte, msg []byte) ([]byte, error) {
 		return ioctlResponse(h, code, out, of.id, status), nil
 
 	case fsctlSrvRequestResumeKey:
-		of := c.fileByID(body[8:])
+		of := c.fileByID(h, body[8:])
 		if of == nil {
 			return errorResponse(h, statusFileClosed), nil
 		}
 		return c.resumeKey(h, of), nil
 
 	case fsctlSrvCopyChunk, fsctlSrvCopyChunkWrite:
-		of := c.fileByID(body[8:])
+		of := c.fileByID(h, body[8:])
 		if of == nil {
 			return errorResponse(h, statusFileClosed), nil
 		}

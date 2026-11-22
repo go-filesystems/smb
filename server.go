@@ -745,6 +745,10 @@ func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]
 		// see below, and read the rename it cost.
 		prevStatus = statusSuccess
 	)
+	// [MS-SMB2] 3.3.5.2.7.2: the FileId a related operation inherits is the one
+	// the previous operation of THIS compound produced, so no chain starts with
+	// one carried over from an earlier request.
+	c.lastFile = [16]byte{}
 	for {
 		h, err := parseHeader(msg)
 		if err != nil {

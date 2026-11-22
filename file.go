@@ -75,7 +75,11 @@ type openFile struct {
 	// (MS-FSCC 2.4.7), put back after writes and the close; -2 clears them.
 	pinAccess, pinWrite pinned
 
+	// session and tree are the Open's own SessionId and TreeConnect
+	// ([MS-SMB2] 3.3.5.9: Open.Session, Open.TreeConnect); fileByID refuses a
+	// request from any other.
 	session      uint64
+	tree         uint32
 	resumeKey    [24]byte
 	hasResumeKey bool
 }
@@ -88,15 +92,35 @@ var allOnesFileID = [16]byte{
 	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 }
 
-func (c *conn) fileByID(b []byte) *openFile {
+// fileByID resolves the FileId a request names to the Open it belongs to, for
+// THAT request only. [MS-SMB2] 3.3.5.10 (READ), 3.3.5.12 (WRITE) and 3.3.5.13
+// (CLOSE), and the same lookup in every other command that takes a FileId, look
+// the Open up in Session.OpenTable and fail with STATUS_FILE_CLOSED when it is
+// not there; an Open lives in the session and tree that created it, so another
+// session (or another tree of the same session) naming its id finds nothing.
+// The caller turns nil into STATUS_FILE_CLOSED.
+//
+// The all-ones FileId is [MS-SMB2] 3.3.5.2.7.2: in a RELATED operation of a
+// compound it stands for the FileId the previous operation of the SAME chain
+// produced. It is never a connection-wide "last file": outside a related
+// operation it means nothing, and the Open it names is held to the same
+// session and tree check as any other.
+func (c *conn) fileByID(h header, b []byte) *openFile {
 	if len(b) < 16 {
 		return nil
 	}
 	id := [16]byte(b[:16])
 	if id == allOnesFileID {
-		return c.files[c.lastFile]
+		if h.flags&flagRelatedOps == 0 {
+			return nil
+		}
+		id = c.lastFile
 	}
-	return c.files[id]
+	of := c.files[id]
+	if of == nil || of.session != h.sessionID || of.tree != h.treeID {
+		return nil
+	}
+	return of
 }
 
 // create opens or makes a file, and is where most of a mount's decisions are.
@@ -193,7 +217,7 @@ func (c *conn) create(h header, body []byte, msg []byte) ([]byte, error) {
 		return errorResponse(h, statusNotADirectory), nil
 	}
 
-	of := &openFile{path: p, share: sh, ro: tc.ro, dir: dir, deleteOnClose: options&optDeleteOnClose != 0, session: h.sessionID}
+	of := &openFile{path: p, share: sh, ro: tc.ro, dir: dir, deleteOnClose: options&optDeleteOnClose != 0, session: h.sessionID, tree: h.treeID}
 	if !dir {
 		if o, canOpen := sh.fsys.(filesystem.Opener); canOpen {
 			if f, err := o.OpenFile(p); err == nil {
@@ -292,7 +316,7 @@ func (c *conn) closeFile(h header, body []byte) ([]byte, error) {
 	if len(body) < 24 {
 		return nil, fmt.Errorf("smb: CLOSE body of %d bytes is too short", len(body))
 	}
-	of := c.fileByID(body[8:])
+	of := c.fileByID(h, body[8:])
 	if of == nil {
 		return errorResponse(h, statusFileClosed), nil
 	}
@@ -343,7 +367,7 @@ func (c *conn) read(h header, body []byte) ([]byte, error) {
 	}
 	length := int(binary.LittleEndian.Uint32(body[4:]))
 	offset := int64(binary.LittleEndian.Uint64(body[8:]))
-	of := c.fileByID(body[16:])
+	of := c.fileByID(h, body[16:])
 	if of == nil {
 		return errorResponse(h, statusFileClosed), nil
 	}
@@ -409,7 +433,7 @@ func (c *conn) write(h header, body []byte, msg []byte) ([]byte, error) {
 	dataOff := int(binary.LittleEndian.Uint16(body[2:]))
 	length := int(binary.LittleEndian.Uint32(body[4:]))
 	offset := int64(binary.LittleEndian.Uint64(body[8:]))
-	of := c.fileByID(body[16:])
+	of := c.fileByID(h, body[16:])
 	if of == nil {
 		return errorResponse(h, statusFileClosed), nil
 	}
@@ -486,23 +510,28 @@ func (c *conn) write(h header, body []byte, msg []byte) ([]byte, error) {
 // flush as data loss.
 func (c *conn) flush(h header, body []byte) ([]byte, error) {
 	if len(body) >= 24 {
-		if of := c.fileByID(body[8:]); of != nil {
-			switch {
-			case of.w != nil:
+		// [MS-SMB2] 3.3.5.11: an Open that is not found in THIS session and tree
+		// is STATUS_FILE_CLOSED. Answering success for a handle that is not the
+		// caller's would also say another session's handle exists.
+		of := c.fileByID(h, body[8:])
+		if of == nil {
+			return errorResponse(h, statusFileClosed), nil
+		}
+		switch {
+		case of.w != nil:
+			defer of.share.changing()()
+			if err := of.w.Sync(); err != nil {
+				return errorResponse(h, statusFor(err, statusAccessDenied)), nil
+			}
+		case of.pipe == nil && !of.dir && !of.ro && of.share.fsys != nil:
+			// A driver with no positional handle (hfsplus) writes whole
+			// files, but may still hold what it accepted until the volume
+			// is synced (hfsplus_durability lazy or mounted): the flush is
+			// the client's request that it be on the medium.
+			if vs, ok := of.share.fsys.(volumeSyncer); ok {
 				defer of.share.changing()()
-				if err := of.w.Sync(); err != nil {
-					return errorResponse(h, statusFor(err, statusAccessDenied)), nil
-				}
-			case of.pipe == nil && !of.dir && !of.ro && of.share.fsys != nil:
-				// A driver with no positional handle (hfsplus) writes whole
-				// files, but may still hold what it accepted until the volume
-				// is synced (hfsplus_durability lazy or mounted): the flush is
-				// the client's request that it be on the medium.
-				if vs, ok := of.share.fsys.(volumeSyncer); ok {
-					defer of.share.changing()()
-					if err := vs.Sync(); err != nil {
-						return errorResponse(h, statusFor(err, statusIOError)), nil
-					}
+				if err := vs.Sync(); err != nil {
+					return errorResponse(h, statusFor(err, statusIOError)), nil
 				}
 			}
 		}

@@ -53,7 +53,7 @@ func (c *conn) openPipe(h header, name string) ([]byte, error) {
 		// the refusal is what makes it carry on rather than retry.
 		return errorResponse(h, statusObjectNameNotFound), nil
 	}
-	of := &openFile{path: name, share: c.tree(h).sh, pipe: &pipe{name: name}, session: h.sessionID}
+	of := &openFile{path: name, share: c.tree(h).sh, pipe: &pipe{name: name}, session: h.sessionID, tree: h.treeID}
 	c.nextFile++
 	binary.LittleEndian.PutUint64(of.id[:8], c.nextFile)
 	binary.LittleEndian.PutUint64(of.id[8:], uint64(h.treeID))

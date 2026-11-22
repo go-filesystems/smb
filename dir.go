@@ -53,7 +53,7 @@ func (c *conn) queryDirectory(h header, body []byte, msg []byte) ([]byte, error)
 	}
 	class := body[2]
 	flags := body[3]
-	of := c.fileByID(body[8:])
+	of := c.fileByID(h, body[8:])
 	if of == nil {
 		return errorResponse(h, statusFileClosed), nil
 	}
