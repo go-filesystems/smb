@@ -60,7 +60,9 @@ reads and writes up to `MaxReadSize`/`MaxWriteSize` (1 MiB) per request.
 Without the claim, go-smb2 and the Linux kernel client both hold every
 request to 64 KiB. A request whose `CreditCharge` does not pay for what it
 sends or asks for is refused with `STATUS_INVALID_PARAMETER`
-(MS-SMB2 3.3.5.2.5). Measured through go-fileshare/fileshare: about ×2.2.
+(MS-SMB2 3.3.5.2.5). What counts is the payload of 3.1.5.2, the data within
+the variable-length field, not the fixed part of the request: a WRITE of
+exactly 64 KiB pays one credit (fixed in v0.17.1, issue #70). Measured through go-fileshare/fileshare: about ×2.2.
 
 **Server-side copy.** `FSCTL_SRV_REQUEST_RESUME_KEY` and
 `FSCTL_SRV_COPYCHUNK`/`_WRITE` are answered (since v0.7.0), so a copy within
