@@ -48,7 +48,7 @@ func (c *conn) queryInfo(h header, body []byte) ([]byte, error) {
 	}
 	infoType := body[2]
 	class := body[3]
-	of := c.fileByID(body[24:])
+	of := c.fileByID(h, body[24:])
 	if of == nil {
 		return errorResponse(h, statusFileClosed), nil
 	}
@@ -296,7 +296,7 @@ func (c *conn) setInfo(h header, body []byte, msg []byte) ([]byte, error) {
 	class := body[3]
 	inLen := int(binary.LittleEndian.Uint32(body[4:]))
 	inOff := int(binary.LittleEndian.Uint16(body[8:]))
-	of := c.fileByID(body[16:])
+	of := c.fileByID(h, body[16:])
 	if of == nil {
 		return errorResponse(h, statusFileClosed), nil
 	}

@@ -298,6 +298,18 @@ srv.Share("data", fs, smb.WithCapacityFunc(func() (uint64, uint64) {
 }))
 ```
 
+## Security notes
+
+- A file handle belongs to the session and the tree that opened it. READ, WRITE,
+  CLOSE, FLUSH, LOCK, IOCTL, QUERY_DIRECTORY, CHANGE_NOTIFY, QUERY_INFO and
+  SET_INFO answer `STATUS_FILE_CLOSED` to a request of any other session or
+  tree, even one that names the right FileId (MS-SMB2 3.3.5.9 to 3.3.5.13).
+  Before v0.17.2 the lookup used the FileId alone, so a second session on the
+  same connection could read, write and close another session's open file.
+- The all-ones FileId means "the file the previous operation of this compound
+  opened" (MS-SMB2 3.3.5.2.7.2). It resolves only in a related operation, only
+  within the same chain, and only to an open of the same session and tree.
+
 ## Licence
 
 BSD-3-Clause.

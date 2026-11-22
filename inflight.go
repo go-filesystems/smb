@@ -130,7 +130,7 @@ func (c *conn) readSpan(msg []byte) (inflight.Span, bool) {
 		return inflight.Span{}, false
 	}
 	body := msg[headerLen:]
-	of := c.fileByID(body[16:])
+	of := c.fileByID(h, body[16:])
 	if of == nil || of.pipe != nil || of.dir {
 		return inflight.Span{}, false
 	}

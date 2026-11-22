@@ -78,10 +78,9 @@ func opened(t *testing.T, fsys filesystem.Filesystem, path string, ro bool) (*co
 	if err != nil {
 		t.Fatal(err)
 	}
-	of := &openFile{path: path, share: sh, ro: ro, dir: isDir(st)}
+	of := &openFile{path: path, share: sh, ro: ro, dir: isDir(st), tree: 1}
 	of.id[0] = 1
 	c.files[of.id] = of
-	c.lastFile = of.id
 	return c, of
 }
 
@@ -399,9 +398,9 @@ func TestListingPagesAndEnds(t *testing.T) {
 		t.Error("a class this server does not write was answered anyway")
 	}
 	// Listing something that is not a directory.
-	cf, _ := opened(t, fs, "/file.txt", false)
+	cf, cof := opened(t, fs, "/file.txt", false)
 	fileBody := make([]byte, 32)
-	copy(fileBody[8:], cf.lastFile[:])
+	copy(fileBody[8:], cof.id[:])
 	out, err := cf.dispatch(request(cmdQueryDirectory, 1, fileBody))
 	if err != nil {
 		t.Fatal(err)
@@ -436,10 +435,9 @@ func TestCloseAndDeleteOnClose(t *testing.T) {
 	if st := statusOf(t, out); st != statusFileClosed {
 		t.Errorf("closing a handle twice answered %#x", st)
 	}
-	// Flush answers success even with nothing to do: a client reads a failed
-	// flush as data loss.
-	if st := statusOf(t, mustDispatch(t, c, cmdFlush, make([]byte, 24))); st != statusSuccess {
-		t.Error("flush did not answer success")
+	// [MS-SMB2] 3.3.5.11: a flush of a handle that is not open is FILE_CLOSED.
+	if st := statusOf(t, mustDispatch(t, c, cmdFlush, make([]byte, 24))); st != statusFileClosed {
+		t.Errorf("flush of a closed handle answered %#x, want STATUS_FILE_CLOSED", st)
 	}
 	if st := statusOf(t, mustDispatch(t, c, cmdFlush, nil)); st != statusSuccess {
 		t.Error("flush with no body did not answer success")
@@ -560,7 +558,7 @@ func TestAChainStopsAtTheFirstFailure(t *testing.T) {
 	}
 	// A failed CREATE also leaves no "file the previous operation opened",
 	// so an all-ones id on its own finds nothing rather than that handle.
-	if c.fileByID(allOnesFileID[:]) != nil {
+	if c.fileByID(header{flags: flagRelatedOps, treeID: 1}, allOnesFileID[:]) != nil {
 		t.Error("after a failed CREATE, an all-ones file id still resolves to something")
 	}
 }
@@ -662,7 +660,7 @@ func TestByteRangeLocks(t *testing.T) {
 
 	// A second handle on the same file, which is what a second client is from
 	// the lock table's point of view.
-	other := &openFile{path: "/file.txt", share: of.share}
+	other := &openFile{path: "/file.txt", share: of.share, tree: 1}
 	other.id[0] = 2
 	c.files[other.id] = other
 
@@ -741,7 +739,7 @@ func TestByteRangeLocks(t *testing.T) {
 func TestASplitLockRequestIsUndone(t *testing.T) {
 	fs := &tinyFS{body: make([]byte, 4096)}
 	c, of := opened(t, fs, "/file.txt", false)
-	blocker := &openFile{path: "/file.txt", share: of.share}
+	blocker := &openFile{path: "/file.txt", share: of.share, tree: 1}
 	blocker.id[0] = 9
 	c.files[blocker.id] = blocker
 
@@ -786,7 +784,7 @@ func TestASplitLockRequestIsUndone(t *testing.T) {
 func TestLocksAreEnforcedOnReadsAndWrites(t *testing.T) {
 	fs := &tinyFS{body: []byte("0123456789abcdefghij")}
 	c, of := opened(t, fs, "/file.txt", false)
-	other := &openFile{path: "/file.txt", share: of.share}
+	other := &openFile{path: "/file.txt", share: of.share, tree: 1}
 	other.id[0] = 2
 	c.files[other.id] = other
 
@@ -851,7 +849,7 @@ func TestWaitingForALock(t *testing.T) {
 	fs := &tinyFS{body: make([]byte, 4096)}
 	c, holder := opened(t, fs, "/file.txt", false)
 	c.nc = &captureConn{}
-	waiter := &openFile{path: "/file.txt", share: holder.share}
+	waiter := &openFile{path: "/file.txt", share: holder.share, tree: 1}
 	waiter.id[0] = 2
 	c.files[waiter.id] = waiter
 
@@ -911,7 +909,7 @@ func TestCancellingAWait(t *testing.T) {
 	fs := &tinyFS{body: make([]byte, 4096)}
 	c, holder := opened(t, fs, "/file.txt", false)
 	c.nc = &captureConn{}
-	waiter := &openFile{path: "/file.txt", share: holder.share}
+	waiter := &openFile{path: "/file.txt", share: holder.share, tree: 1}
 	waiter.id[0] = 2
 	c.files[waiter.id] = waiter
 
@@ -977,7 +975,7 @@ func TestChangeNotify(t *testing.T) {
 
 	h := watch(0, 4096)
 	// Something happens: a file is written through this server.
-	writer := &openFile{path: "/file.txt", share: dir.share}
+	writer := &openFile{path: "/file.txt", share: dir.share, tree: 1}
 	writer.id[0] = 7
 	c.files[writer.id] = writer
 	wb := make([]byte, 48+5)
@@ -1039,7 +1037,7 @@ func TestChangeNotify(t *testing.T) {
 	}
 
 	// A watch on something that is not a directory, and on no handle at all.
-	notDir := &openFile{path: "/file.txt", share: dir.share}
+	notDir := &openFile{path: "/file.txt", share: dir.share, tree: 1}
 	notDir.id[0] = 8
 	c.files[notDir.id] = notDir
 	body := make([]byte, 32)
