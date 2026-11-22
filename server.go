@@ -510,7 +510,6 @@ type conn struct {
 	panicked any // what a connection died of, for a test to insist on
 	files    map[[16]byte]*openFile
 	nextFile uint64
-	lastFile [16]byte // what an all-ones file id in a chained request means
 	// searches remembers where a directory listing got to, keyed by the
 	// handle it is being read through: SMB asks for a directory in pages and
 	// expects the second page to continue the first.
@@ -746,9 +745,11 @@ func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]
 		prevStatus = statusSuccess
 	)
 	// [MS-SMB2] 3.3.5.2.7.2: the FileId a related operation inherits is the one
-	// the previous operation of THIS compound produced, so no chain starts with
-	// one carried over from an earlier request.
-	c.lastFile = [16]byte{}
+	// the previous operation of THIS compound produced. It lives here, in the
+	// chain, and nowhere on the connection: chains of one connection run side by
+	// side, and a connection-wide value would hand one session's handle to
+	// another's all-ones id. The zero value names nothing.
+	var relatedFile [16]byte
 	for {
 		h, err := parseHeader(msg)
 		if err != nil {
@@ -898,9 +899,22 @@ func (c *conn) chain(msg []byte, encrypted bool, tsid uint64, seal *sealing) ([]
 			*seal = sealing{binary.LittleEndian.Uint64(one[offSessionID:]), sess.crypto}
 		}
 
+		// A related operation names the chain's file by the all-ones id: it is
+		// replaced here, after the signature was checked, by the id this chain
+		// produced (or by nothing).
+		if h.flags&flagRelatedOps != 0 {
+			if off := fileIDOffset(h.command); off >= 0 && len(one) >= headerLen+off+16 &&
+				[16]byte(one[headerLen+off:]) == allOnesFileID {
+				one = append([]byte(nil), one...)
+				copy(one[headerLen+off:], relatedFile[:])
+			}
+		}
 		reply, err := c.dispatchEnc(one, encrypted, credited)
 		if err != nil {
 			return nil, err
+		}
+		if h.command == cmdCreate && len(reply) >= headerLen+80 && binary.LittleEndian.Uint32(reply[offStatus:]) == statusSuccess {
+			relatedFile = [16]byte(reply[headerLen+64:])
 		}
 		if reply != nil {
 			reply = compoundReply(reply, h.nextCommand != 0)
@@ -988,6 +1002,20 @@ func (c *conn) finish(out []byte, prevAt int, reply []byte, sess *session, h hea
 		binary.LittleEndian.PutUint32(out[prevAt+offNextCommand:], uint32(len(out)-prevAt))
 	}
 	return append(out, reply...)
+}
+
+// fileIDOffset is where a command's body carries its FileId, counted from the end
+// of the header, or -1 for a command that has none.
+func fileIDOffset(cmd command) int {
+	switch cmd {
+	case cmdClose, cmdFlush, cmdLock, cmdIoctl, cmdQueryDirectory, cmdChangeNotify:
+		return 8
+	case cmdRead, cmdWrite, cmdSetInfo:
+		return 16
+	case cmdQueryInfo:
+		return 24
+	}
+	return -1
 }
 
 // withInheritedIDs gives a chained request the session and tree of the one it

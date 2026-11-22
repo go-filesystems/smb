@@ -107,7 +107,6 @@ func TestEveryIoctlRefusesAnotherSessionsHandle(t *testing.T) {
 			related bool
 		}{{"its id", [16]byte{}, false}, {"all-ones", allOnesFileID, true}} {
 			c, of, _ := ownerConn(t)
-			c.lastFile = of.id
 			id := fid.id
 			if fid.name == "its id" {
 				id = of.id
@@ -181,7 +180,7 @@ func TestAllOnesFileIDIsNotAConnectionWideLastFile(t *testing.T) {
 	for _, cmd := range ownerCommands {
 		t.Run(cmd.String()+"/unrelated", func(t *testing.T) {
 			c, of, _ := ownerConn(t)
-			c.lastFile = of.id // alice's CREATE was the last thing this connection did
+			// alice's CREATE was the last thing this connection did
 			out, err := c.dispatchChain(requestIn(cmd, 2, 6, ownerBody(cmd, allOnesFileID)))
 			if err != nil {
 				t.Fatal(err)
@@ -195,7 +194,6 @@ func TestAllOnesFileIDIsNotAConnectionWideLastFile(t *testing.T) {
 		})
 		t.Run(cmd.String()+"/related first operation", func(t *testing.T) {
 			c, of, _ := ownerConn(t)
-			c.lastFile = of.id
 			m := requestIn(cmd, 2, 6, ownerBody(cmd, allOnesFileID))
 			binary.LittleEndian.PutUint32(m[offFlags:], flagRelatedOps)
 			out, err := c.dispatchChain(m)
@@ -226,20 +224,53 @@ func TestAShortFileIDNamesNothing(t *testing.T) {
 // Across sessions inside one chain: a related operation inherits the session and
 // tree of the first, so the all-ones id of a chain that bob starts is bob's open,
 // and is held to the same check if it names someone else's.
-func TestRelatedFileIDResolvesOnlyWithinItsSessionAndTree(t *testing.T) {
-	c, of, _ := ownerConn(t)
-	// The last open of the connection is alice's; bob's chain opens nothing.
-	c.lastFile = of.id
-	if got := c.fileByID(header{flags: flagRelatedOps, sessionID: 2, treeID: 6}, allOnesFileID[:]); got != nil {
-		t.Error("bob's related all-ones id resolved to alice's open")
+func TestRelatedFileIDResolvesOnlyWithinItsOwnChain(t *testing.T) {
+	c, _, _ := ownerConn(t)
+
+	// alice's chain: CREATE, then a related READ that names the file by all-ones.
+	name := utf16le("file.txt")
+	create := make([]byte, 56)
+	binary.LittleEndian.PutUint32(create[36:], dispOpen)
+	binary.LittleEndian.PutUint16(create[44:], uint16(headerLen+56))
+	binary.LittleEndian.PutUint16(create[46:], uint16(len(name)))
+	first := requestIn(cmdCreate, 1, 5, append(create, name...))
+	for len(first)%8 != 0 {
+		first = append(first, 0)
 	}
-	if got := c.fileByID(header{flags: flagRelatedOps, sessionID: 1, treeID: 7}, allOnesFileID[:]); got != nil {
-		t.Error("alice's related all-ones id on another tree resolved to her open of tree 5")
+	binary.LittleEndian.PutUint32(first[offNextCommand:], uint32(len(first)))
+	second := requestIn(cmdRead, 1, 5, ownerBody(cmdRead, allOnesFileID))
+	binary.LittleEndian.PutUint32(second[offFlags:], flagRelatedOps)
+	out, err := c.dispatchChain(append(first, second...))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := c.fileByID(header{flags: flagRelatedOps, sessionID: 1, treeID: 5}, allOnesFileID[:]); got != of {
-		t.Error("the owner's related all-ones id did not resolve to its open")
+	h, err := parseHeader(out)
+	if err != nil || h.status != statusSuccess || h.nextCommand == 0 {
+		t.Fatalf("alice's CREATE: %v %#x", err, h.status)
 	}
-	if got := c.fileByID(header{sessionID: 1, treeID: 5}, allOnesFileID[:]); got != nil {
-		t.Error("an unrelated all-ones id resolved")
+	if st := statusOf(t, out[h.nextCommand:]); st != statusSuccess {
+		t.Errorf("alice's related READ of her own CREATE answered %#x", st)
+	}
+
+	// bob's chain starts with a related READ: there is nothing before it in HIS
+	// chain, and alice's open is not "the previous operation".
+	m := requestIn(cmdRead, 2, 6, ownerBody(cmdRead, allOnesFileID))
+	binary.LittleEndian.PutUint32(m[offFlags:], flagRelatedOps)
+	out, err = c.dispatchChain(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := statusOf(t, out); st != statusFileClosed {
+		t.Errorf("bob's related all-ones READ answered %#x, want STATUS_FILE_CLOSED", st)
+	}
+
+	// An all-ones id that no chain substituted names nothing, whoever asks.
+	for _, hd := range []header{
+		{flags: flagRelatedOps, sessionID: 1, treeID: 5},
+		{sessionID: 1, treeID: 5},
+	} {
+		if got := c.fileByID(hd, allOnesFileID[:]); got != nil {
+			t.Errorf("an unsubstituted all-ones id resolved for %+v", hd)
+		}
 	}
 }

@@ -81,7 +81,6 @@ func opened(t *testing.T, fsys filesystem.Filesystem, path string, ro bool) (*co
 	of := &openFile{path: path, share: sh, ro: ro, dir: isDir(st), tree: 1}
 	of.id[0] = 1
 	c.files[of.id] = of
-	c.lastFile = of.id
 	return c, of
 }
 
@@ -399,9 +398,9 @@ func TestListingPagesAndEnds(t *testing.T) {
 		t.Error("a class this server does not write was answered anyway")
 	}
 	// Listing something that is not a directory.
-	cf, _ := opened(t, fs, "/file.txt", false)
+	cf, cof := opened(t, fs, "/file.txt", false)
 	fileBody := make([]byte, 32)
-	copy(fileBody[8:], cf.lastFile[:])
+	copy(fileBody[8:], cof.id[:])
 	out, err := cf.dispatch(request(cmdQueryDirectory, 1, fileBody))
 	if err != nil {
 		t.Fatal(err)

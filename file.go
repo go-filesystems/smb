@@ -102,19 +102,18 @@ var allOnesFileID = [16]byte{
 //
 // The all-ones FileId is [MS-SMB2] 3.3.5.2.7.2: in a RELATED operation of a
 // compound it stands for the FileId the previous operation of the SAME chain
-// produced. It is never a connection-wide "last file": outside a related
-// operation it means nothing, and the Open it names is held to the same
-// session and tree check as any other.
+// produced. chain() substitutes it, from a value local to that chain, before the
+// request reaches a handler (see relatedFileIDOffset); an all-ones id that is
+// still there names nothing. There is no connection-wide "last file", which
+// would let one session (or one chain running beside another) reach a handle
+// another created. The Open that is found is held to the session and tree check.
 func (c *conn) fileByID(h header, b []byte) *openFile {
 	if len(b) < 16 {
 		return nil
 	}
 	id := [16]byte(b[:16])
 	if id == allOnesFileID {
-		if h.flags&flagRelatedOps == 0 {
-			return nil
-		}
-		id = c.lastFile
+		return nil
 	}
 	of := c.files[id]
 	if of == nil || of.session != h.sessionID || of.tree != h.treeID {
@@ -130,11 +129,6 @@ func (c *conn) create(h header, body []byte, msg []byte) ([]byte, error) {
 		return errorResponse(h, statusNetworkNameDeleted), nil
 	}
 	sh := tc.sh
-	// From here on this CREATE may fail, and if it does there is no "file the
-	// previous operation opened" any more. Clearing it first means an
-	// all-ones file id after a failure finds NOTHING rather than the handle
-	// this connection opened before -- which is somebody's live file.
-	c.lastFile = [16]byte{}
 	// CREATE stats, may write, stats again and opens. Two clients creating the
 	// same file would otherwise both find it missing.
 	defer sh.changing()()
@@ -240,7 +234,6 @@ func (c *conn) create(h header, body []byte, msg []byte) ([]byte, error) {
 	binary.LittleEndian.PutUint64(of.id[8:], uint64(h.treeID))
 	c.files[of.id] = of
 	c.nOpen.Add(1)
-	c.lastFile = of.id
 
 	const bodyLen = 88
 	b := append(responseTo(h, statusSuccess), make([]byte, bodyLen+1)...)
