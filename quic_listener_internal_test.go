@@ -77,9 +77,8 @@ func TestRetryEngagesUnderLoadAndNotBefore(t *testing.T) {
 // A peer that finishes the handshake and opens no stream holds a slot for
 // quicStreamWait and is then closed with an application error.
 func TestAPeerThatOpensNoStreamIsLetGo(t *testing.T) {
-	old := quicStreamWait
-	quicStreamWait = 300 * time.Millisecond
-	t.Cleanup(func() { quicStreamWait = old })
+	old := quicStreamWait.Swap(int64(300 * time.Millisecond))
+	t.Cleanup(func() { quicStreamWait.Store(old) })
 	l, conf := listen(t, WithQUICMaxConnections(2))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

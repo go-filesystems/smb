@@ -44,8 +44,13 @@ const (
 var quicHandshakeTimeout = 5 * time.Second
 
 // quicStreamWait is how long a connection that completed its handshake may
-// take to open its first stream. A variable so a test can shorten it.
-var quicStreamWait = 10 * time.Second
+// take to open its first stream. Atomic so a test can shorten it while a
+// connection of an earlier test is still reading it.
+var quicStreamWait = func() *atomic.Int64 {
+	v := new(atomic.Int64)
+	v.Store(int64(10 * time.Second))
+	return v
+}()
 
 type quicOptions struct {
 	streamWin, connWin uint64
@@ -214,7 +219,7 @@ const (
 // opens it holds a slot for quicStreamWait and no more.
 func (l *quicListener) firstStream(qc *quic.Conn) {
 	release := func() { <-l.slots }
-	ctx, cancel := context.WithTimeout(context.Background(), quicStreamWait)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(quicStreamWait.Load()))
 	defer cancel()
 	st, err := qc.AcceptStream(ctx)
 	if err != nil {
