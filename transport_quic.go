@@ -90,6 +90,12 @@ func WithQUICRetryRate(perSecond int) QUICOption {
 	}
 }
 
+// quicListen is quic-go's Transport.Listen, a variable so a test can make it
+// fail: it cannot on a valid configuration, and the cleanup after it must run.
+var quicListen = func(tr *quic.Transport, c *tls.Config, qc *quic.Config) (*quic.Listener, error) {
+	return tr.Listen(c, qc)
+}
+
 // ListenQUIC listens on UDP addr and returns a net.Listener whose Accept yields
 // one net.Conn per QUIC connection: its first bidirectional stream, with
 // RemoteAddr the client's UDP address. Pass it to [Server.Serve].
@@ -121,7 +127,7 @@ func ListenQUIC(addr string, tlsConf *tls.Config, opts ...QUICOption) (net.Liste
 	}
 	l.rate = o.retryRate
 	l.tr = &quic.Transport{Conn: pc, VerifySourceAddress: l.verify}
-	ql, err := l.tr.Listen(conf, &quic.Config{
+	ql, err := quicListen(l.tr, conf, &quic.Config{
 		HandshakeIdleTimeout:           quicHandshakeTimeout,
 		MaxIdleTimeout:                 60 * time.Second,
 		KeepAlivePeriod:                20 * time.Second,

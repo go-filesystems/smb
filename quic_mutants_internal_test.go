@@ -176,3 +176,64 @@ func TestListenQUICBindFailureAndNoCertificate(t *testing.T) {
 		t.Fatal("listened on a malformed address")
 	}
 }
+
+// Contexts that parse on their own but start inside the dialect array: only the
+// offset guard refuses them (garbage there is refused by the parser as well).
+func TestNegotiateContextsMayNotStartInsideTheDialects(t *testing.T) {
+	pre := ctxPreauth([]uint16{hashIDSHA512}, make([]byte, 32))
+	// Four dialects, the last two of which read as a context header (offset 104,
+	// the 8-byte boundary the array crosses).
+	dialects := []uint16{dialect311, 0, pre.typ, uint16(len(pre.data))}
+	body := make([]byte, 36+2*len(dialects))
+	putU16(body[0:], 36)
+	putU16(body[2:], uint16(len(dialects)))
+	putU16(body[4:], signingEnabled)
+	putU32(body[8:], 0x7f)
+	for i, d := range dialects {
+		putU16(body[36+2*i:], d)
+	}
+	req := requestOf(cmdNegotiate, body)
+	req = append(req, 0, 0, 0, 0) // the header's reserved field, just after the array
+	req = append(req, pre.data...)
+	off := headerLen + 36 + 4 // the third dialect: 104
+	putU32(req[headerLen+28:], uint32(off))
+	putU16(req[headerLen+32:], 1)
+	c := &conn{srv: New()}
+	resp, err := c.dispatch(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := statusOf(t, resp); st != statusInvalidParameter {
+		t.Fatalf("contexts inside the dialect array: status %#x, want STATUS_INVALID_PARAMETER", st)
+	}
+}
+
+// An offset that points into the fixed part or the dialect array is refused
+// whatever the bytes there say; the first valid offset is accepted.
+func TestNegotiateContextOffsetBound(t *testing.T) {
+	first := headerLen + 36 + 2*2 // two dialects
+	for _, off := range []int{first - 1, first - 2, first - 4, headerLen + 36, headerLen + 28} {
+		req := negotiateRequest311(ctxPreauth([]uint16{hashIDSHA512}, make([]byte, 32)))
+		putU32(req[headerLen+28:], uint32(off))
+		c := &conn{srv: New()}
+		resp, err := c.dispatch(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st := statusOf(t, resp); st != statusInvalidParameter {
+			t.Fatalf("offset %d: status %#x, want STATUS_INVALID_PARAMETER", off, st)
+		}
+	}
+	req := negotiateRequest311(ctxPreauth([]uint16{hashIDSHA512}, make([]byte, 32)))
+	if got := int(binary.LittleEndian.Uint32(req[headerLen+28:])); got != first {
+		t.Fatalf("the request puts its contexts at %d, want %d", got, first)
+	}
+	c := &conn{srv: New()}
+	resp, err := c.dispatch(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := statusOf(t, resp); st != statusSuccess {
+		t.Fatalf("the first valid offset: status %#x", st)
+	}
+}
