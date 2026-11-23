@@ -91,6 +91,7 @@ type quicFixture struct {
 
 func startQUIC(t testing.TB, tune func(*tls.Config), opts ...fssmb.QUICOption) *quicFixture {
 	t.Helper()
+	t.Cleanup(fssmb.SetQUICHandshakeTimeout(60 * time.Second))
 	ca := newCA(t, "test ca")
 	conf := &tls.Config{Certificates: []tls.Certificate{ca.issue(t, "files.test", x509.ExtKeyUsageServerAuth, "files.test")}}
 	if tune != nil {
@@ -118,9 +119,9 @@ func (f *quicFixture) clientConf(mut func(*tls.Config)) *tls.Config {
 }
 
 func (f *quicFixture) dialQUIC(t testing.TB, conf *tls.Config) (*qconn, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	qc, err := quic.DialAddr(ctx, f.addr, conf, &quic.Config{MaxIdleTimeout: 10 * time.Second})
+	qc, err := quic.DialAddr(ctx, f.addr, conf, &quic.Config{MaxIdleTimeout: 60 * time.Second, HandshakeIdleTimeout: 60 * time.Second})
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +138,7 @@ func (f *quicFixture) mountOver(t testing.TB, conf *tls.Config) (*smb2.Share, fu
 	if err != nil {
 		return nil, nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	d := &smb2.Dialer{Initiator: &smb2.NTLMInitiator{User: "alice", Password: "hunter2"}}
 	s, err := d.DialConn(ctx, nc, f.addr)
 	if err != nil {

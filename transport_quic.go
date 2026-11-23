@@ -36,9 +36,12 @@ const (
 	defaultQUICConnWindow   = 16 << 20
 	defaultQUICMaxConns     = 1024
 	defaultQUICRetryRate    = 64 // Initial packets per second from unvalidated sources before Retry
-	quicHandshakeTimeout    = 5 * time.Second
 	quicCloseGrace          = 100 * time.Millisecond
 )
+
+// quicHandshakeTimeout bounds the TLS handshake. A variable so a test run
+// under CPU emulation (s390x under qemu-user) can lengthen it.
+var quicHandshakeTimeout = 5 * time.Second
 
 // quicStreamWait is how long a connection that completed its handshake may
 // take to open its first stream. A variable so a test can shorten it.
