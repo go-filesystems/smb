@@ -23,6 +23,7 @@ const (
 	fileStandardInformation    uint8 = 5
 	fileInternalInformation    uint8 = 6
 	fileEaInformation          uint8 = 7
+	fileFullEaInformation      uint8 = 15
 	fileAccessInformation      uint8 = 8
 	fileNameInformation        uint8 = 9
 	fileAllInformation         uint8 = 18
@@ -67,6 +68,13 @@ func (c *conn) queryInfo(h header, body []byte) ([]byte, error) {
 	var out []byte
 	switch infoType {
 	case infoTypeFile:
+		if class == fileFullEaInformation {
+			// This server stores no extended attributes. [MS-FSA] 2.1.5.12.12
+			// answers a query on an object with none with STATUS_NO_EAS_ON_FILE,
+			// which a client (the Linux cifs listxattr, Windows) reads as "an empty
+			// list"; INVALID_INFO_CLASS read as an I/O error and broke `ls -la`.
+			return errorResponse(h, statusNoEAsOnFile), nil
+		}
 		out = fileInfo(class, of, st)
 	case infoTypeFilesystem:
 		out = fsInfo(class, of.share, of.ro)

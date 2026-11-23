@@ -24,6 +24,7 @@ const (
 	statusObjectNameCollision  uint32 = 0xC0000035
 	statusObjectPathNotFound   uint32 = 0xC000003A
 	statusSharingViolation     uint32 = 0xC0000043
+	statusNoEAsOnFile          uint32 = 0xC0000052
 	statusDeletePending        uint32 = 0xC0000056
 	statusLogonFailure         uint32 = 0xC000006D
 	statusBadNetworkName       uint32 = 0xC00000CC
