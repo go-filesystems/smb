@@ -1,0 +1,3 @@
+124:	qc, err := quic.DialAddr(ctx, f.addr, conf, &quic.Config{MaxIdleTimeout: 60 * time.Second, HandshakeIdleTimeout: 60 * time.Second})
+162:	fs.WriteFile("/big.bin", want, 0o644)
+171:	got, err := sh.ReadFile("big.bin")
