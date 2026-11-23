@@ -95,6 +95,13 @@ type Server struct {
 	// whose shares then refuse every connection. Set it before the first
 	// connection.
 	DisableEncryption bool
+	// DisableEncryptionOverSecureTransport is [MS-SMB2] 3.3.1.4's
+	// DisableEncryptionOverSecureTransport: on a QUIC connection, a client that
+	// sets SMB2_ACCEPT_TRANSPORT_LEVEL_SECURITY in its SMB2_TRANSPORT_CAPABILITIES
+	// context is told the server accepts it, and SMB 3.1.1 encryption is not
+	// negotiated on that connection (TLS 1.3 already encrypts it). The default,
+	// false, keeps SMB encryption and signing on top of TLS.
+	DisableEncryptionOverSecureTransport bool
 	// MaxConnections is how many connections the server holds at once; zero means
 	// [DefaultMaxConnections] and a negative value no limit. A connection over the
 	// limit is closed as it is accepted. Set it before the first connection.
@@ -484,6 +491,12 @@ type conn struct {
 	connLimitState // see limits.go
 	clientDialects []uint16
 	clientGuid     [16]byte
+	// transport is Connection.TransportName: "quic" when the net.Conn came from
+	// ListenQUIC, "tcp" otherwise.
+	transport string
+	// acceptTransportSecurity is Connection.AcceptTransportSecurity
+	// ([MS-SMB2] 3.3.5.4), set on a QUIC connection only.
+	acceptTransportSecurity bool
 	// seq is the command sequence window. It is nil until serve starts it, so a
 	// test that drives dispatchChain by hand, with every request numbered 0, is not
 	// refused for replaying itself; a window is tested on its own.
@@ -526,8 +539,12 @@ type conn struct {
 }
 
 func newConn(s *Server, nc net.Conn) *conn {
+	transport := "tcp"
+	if t, ok := nc.(interface{ TransportName() string }); ok {
+		transport = t.TransportName()
+	}
 	return &conn{
-		srv: s, nc: nc,
+		srv: s, nc: nc, transport: transport,
 		sessions: map[uint64]*session{},
 		trees:    map[uint32]*treeConn{},
 		files:    map[[16]byte]*openFile{},

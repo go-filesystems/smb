@@ -1,0 +1,18 @@
+6:# not. s390x is not box-ticking here.
+99:        goarch: [amd64, arm64, riscv64, loong64, ppc64le, s390x]
+108:      # ⛔ `qemu-user-static` is a VIRTUAL package on Ubuntu 26.04, which
+112:      #   E: Package 'qemu-user-static' has no installation candidate
+114:      # ⚠ Installing a provider is NOT the fix: `qemu-user-binfmt` registers binfmt
+115:      # handlers, it does not ship the `qemu-<arch>-static` binaries this lane
+116:      # invokes. `qemu-user` ships the dynamic `qemu-<arch>`, which is all that
+119:      - name: install qemu user-mode emulators
+121:        run: sudo apt-get update && sudo apt-get install -y qemu-user qemu-user-binfmt
+126:          # the one outcome this matrix exists to rule out. qemu-user ships the dynamic
+127:          # qemu-<arch>; qemu-user-static, now a virtual package, shipped the static one.
+128:          qemu_for() {
+129:            for cand in "qemu-$1-static" "qemu-$1"; do
+132:            echo "::error::no qemu user emulator for $1 (looked for qemu-$1-static and qemu-$1)" >&2
+137:            riscv64) e="$(qemu_for riscv64)" || exit 1; echo "running riscv64 under $e"; GOARCH=riscv64 go test -count=1 -exec="$e" ./... ;;
+138:            loong64) e="$(qemu_for loongarch64)" || exit 1; echo "running loong64 under $e"; GOARCH=loong64 go test -count=1 -exec="$e" ./... ;;
+139:            ppc64le) e="$(qemu_for ppc64le)" || exit 1; echo "running ppc64le under $e"; GOARCH=ppc64le go test -count=1 -exec="$e" ./... ;;
+140:            s390x) e="$(qemu_for s390x)" || exit 1; echo "running s390x under $e"; GOARCH=s390x   go test -count=1 -exec="$e" ./... ;;

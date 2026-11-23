@@ -34,9 +34,15 @@ const (
 	ctxPreauthIntegrity uint16 = 0x0001
 	ctxEncryption       uint16 = 0x0002
 	ctxCompression      uint16 = 0x0003
+	ctxTransportCaps    uint16 = 0x0006
 	ctxRDMATransform    uint16 = 0x0007
 	ctxSigning          uint16 = 0x0008
 )
+
+// flagAcceptTransportSecurity is SMB2_ACCEPT_TRANSPORT_LEVEL_SECURITY, the one
+// flag of SMB2_TRANSPORT_CAPABILITIES ([MS-SMB2] 2.2.3.1.5): "transport security
+// is offered to skip SMB2 encryption on this connection".
+const flagAcceptTransportSecurity uint32 = 0x00000001
 
 // maxNegotiateContexts bounds the list before a byte of it is read: a context
 // is at least 8 bytes, so a count the message cannot hold is a lie, and a
@@ -50,6 +56,14 @@ type clientContexts struct {
 	signing    []uint16 // SigningAlgorithms of SMB2_SIGNING_CAPABILITIES, most preferred first
 	hasCipher  bool     // an ENCRYPTION context was present
 	hasSigning bool     // a SIGNING context was present
+
+	// TRANSPORT_CAPABILITIES (0x0006). It means something only on a QUIC
+	// connection, so the parser reports what it saw and negotiate decides:
+	// over TCP the context is ignored, as [MS-SMB2] 3.3.5.4 ignores a context it
+	// does not apply.
+	transports   int    // how many were present
+	shortTrans   bool   // one had DataLength < 4
+	transportFlg uint32 // Flags of the first complete one
 }
 
 // parseNegotiateContexts reads the NegotiateContextList of a 3.1.1 NEGOTIATE
@@ -112,6 +126,13 @@ func parseNegotiateContexts(msg []byte, off, count int) (clientContexts, uint32)
 				return cc, statusInvalidParameter
 			}
 			cc.signing = readU16s(data[2:], n)
+		case ctxTransportCaps:
+			cc.transports++
+			if len(data) < 4 {
+				cc.shortTrans = true
+			} else if cc.transports == 1 {
+				cc.transportFlg = binary.LittleEndian.Uint32(data)
+			}
 		case ctxCompression:
 			comp++
 		case ctxRDMATransform:
@@ -200,6 +221,14 @@ func cipherContext(id uint16) outContext {
 	binary.LittleEndian.PutUint16(d[0:], 1)
 	binary.LittleEndian.PutUint16(d[2:], id)
 	return outContext{ctxEncryption, d}
+}
+
+// transportContext is the SMB2_TRANSPORT_CAPABILITIES answer: the flags the
+// server accepts.
+func transportContext(flags uint32) outContext {
+	d := make([]byte, 4)
+	binary.LittleEndian.PutUint32(d[0:], flags)
+	return outContext{ctxTransportCaps, d}
 }
 
 // signingContext is the SMB2_SIGNING_CAPABILITIES answer: the one algorithm

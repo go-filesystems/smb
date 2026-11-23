@@ -94,6 +94,11 @@ func (c *conn) negotiate(h header, body, msg []byte) ([]byte, error) {
 		if status != statusSuccess {
 			return errorResponse(h, status), nil
 		}
+		// [MS-SMB2] 3.3.5.4: a TRANSPORT_CAPABILITIES context shorter than its
+		// structure fails the request. It is read on a QUIC connection only.
+		if c.transport == "quic" && (cc.shortTrans || cc.transports > 1) {
+			return errorResponse(h, statusInvalidParameter), nil
+		}
 		var ok bool
 		if hashID, ok = chooseHash(cc.hashes); !ok {
 			return errorResponse(h, statusNoPreauthHashOverlap), nil
@@ -104,7 +109,15 @@ func (c *conn) negotiate(h header, body, msg []byte) ([]byte, error) {
 		// [MS-SMB2] 3.3.5.4: an ENCRYPTION context the server supports is
 		// ALWAYS answered, with cipher 0 when nothing is shared, so that a client
 		// can tell "no common cipher" from "does not encrypt" (no context).
-		if cc.hasCipher && !c.srv.DisableEncryption {
+		// "If the underlying connection is over QUIC, DisableEncryptionOverSecureTransport
+		// is TRUE and SMB2_ACCEPT_TRANSPORT_LEVEL_SECURITY is set, the server MUST set
+		// Connection.AcceptTransportSecurity to TRUE", and the response carries the flag.
+		if c.transport == "quic" && c.srv.DisableEncryptionOverSecureTransport &&
+			cc.transports == 1 && cc.transportFlg&flagAcceptTransportSecurity != 0 {
+			c.acceptTransportSecurity = true
+			ctxs = append(ctxs, transportContext(flagAcceptTransportSecurity))
+		}
+		if cc.hasCipher && !c.srv.DisableEncryption && !c.acceptTransportSecurity {
 			cipherID = chooseCipher(cc.ciphers)
 			ctxs = append(ctxs, cipherContext(cipherID))
 		}
@@ -139,6 +152,9 @@ func (c *conn) negotiate(h header, body, msg []byte) ([]byte, error) {
 // ([MS-SMB2] 2.2.4).
 func (c *conn) serverCaps(dialect uint16) uint32 {
 	caps := capabilitiesFor(dialect)
+	if !c.supportsMultiCredit() {
+		caps &^= capLargeMTU
+	}
 	if (dialect == dialect300 || dialect == dialect302) && c.encCapable() {
 		caps |= capEncryption
 	}
@@ -182,9 +198,15 @@ func (c *conn) negotiateResponse(h header, dialect uint16, ctxs []outContext) []
 	copy(body[8:24], c.srv.guid[:]) // identity, not a secret -- and stable, because
 	//                                 the validate-negotiate exchange below
 	//                                 compares it against what was sent here
-	binary.LittleEndian.PutUint32(body[28:], maxTransactSize)
-	binary.LittleEndian.PutUint32(body[32:], maxReadSize)
-	binary.LittleEndian.PutUint32(body[36:], maxWriteSize)
+	tx, rd, wr := uint32(maxTransactSize), uint32(maxReadSize), uint32(maxWriteSize)
+	if !c.supportsMultiCredit() {
+		// One credit carries 64 KiB, and without multi-credit no request may
+		// ask for more ([MS-SMB2] 3.1.5.2), so the sizes are not promised.
+		tx, rd, wr = 65536, 65536, 65536
+	}
+	binary.LittleEndian.PutUint32(body[28:], tx)
+	binary.LittleEndian.PutUint32(body[32:], rd)
+	binary.LittleEndian.PutUint32(body[36:], wr)
 	now := filetime(time.Now())
 	binary.LittleEndian.PutUint64(body[40:], now)
 	binary.LittleEndian.PutUint64(body[48:], now)

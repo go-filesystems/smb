@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("-----BEGIN -----\n-----END \xc2\xe6:\xa0\n\xa9:\xa4\n0\n")

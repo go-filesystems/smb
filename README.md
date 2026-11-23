@@ -298,6 +298,29 @@ srv.Share("data", fs, smb.WithCapacityFunc(func() (uint64, uint64) {
 }))
 ```
 
+### SMB over QUIC
+
+`smb.ListenQUIC(addr, tlsConf)` returns a `net.Listener` for SMB 3.1.1 over QUIC
+(UDP, TLS 1.3, ALPN `smb`, one bidirectional stream per connection); give it to
+`Serve` as any other. The certificate needs a DNS name in its SAN, which
+Windows 11 and Server 2025 clients check. No 0-RTT. Bounds: `WithQUICMaxConnections`
+(default 1024; over it a connection is closed with application error 1),
+`WithQUICRetryRate` (Initial packets per second before source-address
+validation by Retry, default 64), `WithQUICWindows`. A connection that never
+opens its stream is closed after 10 s.
+
+Per [MS-SMB2] 3.3.5.4 a QUIC connection gets no multi-credit requests and no
+LARGE_MTU: every read and write is at most 64 KiB, so a 1 MiB read is sixteen
+round trips (`go test -bench Transport -cpu 1 .` against TCP). The
+SMB2_TRANSPORT_CAPABILITIES context is parsed, and with
+`Server.DisableEncryptionOverSecureTransport` the SMB-level encryption is left
+to TLS when the client says it accepts that.
+
+`smb.RequireClientCertificate(conf, caPEM)` makes the handshake demand a client
+certificate chaining to the given CAs (`ParseClientCAs` refuses an empty,
+oversized, or non-certificate bundle). Kerberos is still what names the person.
+`-tags noquic` builds without it; `ListenQUIC` then returns `ErrNoQUIC`.
+
 ## Security notes
 
 - A file handle belongs to the session and the tree that opened it. READ, WRITE,
