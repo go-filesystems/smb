@@ -140,6 +140,14 @@ func TestQueryInfoClasses(t *testing.T) {
 	if st := statusOf(t, ask(infoTypeFile, 99)); st != statusInvalidInfoClass {
 		t.Errorf("an unknown file class answered %#x", st)
 	}
+	// [MS-FSA] 2.1.5.12.12: no extended attributes is NO_EAS_ON_FILE, not an
+	// unknown class (the Linux cifs listxattr failed `ls -la` with EIO on it).
+	if st := statusOf(t, ask(infoTypeFile, fileFullEaInformation)); st != statusNoEAsOnFile {
+		t.Errorf("FileFullEaInformation answered %#x, want NO_EAS_ON_FILE (0xC0000052)", st)
+	}
+	if statusNoEAsOnFile != 0xC0000052 {
+		t.Errorf("STATUS_NO_EAS_ON_FILE is %#x", statusNoEAsOnFile)
+	}
 	if st := statusOf(t, ask(infoTypeSecurity, 0)); st != statusNotSupported {
 		t.Errorf("a security descriptor answered %#x, want NOT_SUPPORTED", st)
 	}
