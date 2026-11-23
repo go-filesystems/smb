@@ -22,7 +22,7 @@ import (
 //
 // Over TCP a read of 1 MiB is one multi-credit request; over QUIC
 // [MS-SMB2] 3.3.5.4 forbids multi-credit, so it is sixteen 64 KiB requests.
-func benchMount(b *testing.B, quicT bool) (*smb2.Share, func()) {
+func benchMount(b testing.TB, quicT bool) (*smb2.Share, func()) {
 	b.Helper()
 	fs := newMemFS(true)
 	fs.WriteFile("/big.bin", bytes.Repeat([]byte("0123456789abcdef"), 1<<20/16), 0o644)
@@ -129,5 +129,42 @@ func BenchmarkTransportStat(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// TestQUICAllocBudget pins what a 1 MiB read costs in allocations. Measured
+// 2026-11-23 (#78): about 3.8k on linux/arm64 and 9.3k on darwin/arm64, against
+// 75 over TCP. Almost all of it is per UDP packet inside quic-go and
+// golang.org/x/net/internal/socket (parseInetAddr, sockaddrToAddr, the stream
+// frame appended per packet), about 820 packets per MiB; this package's own
+// share is under 5 %. The budget is the measured darwin figure with 40 % of
+// headroom, so the code in this package cannot double the cost unseen, and
+// the TCP path must stay a small constant.
+func TestQUICAllocBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocation budget: skipped in -short")
+	}
+	for _, c := range []struct {
+		name   string
+		quic   bool
+		budget float64
+	}{{"tcp", false, 200}, {"quic", true, 13000}} {
+		sh, done := benchMount(t, c.quic)
+		got := testing.AllocsPerRun(5, func() {
+			f, err := sh.Open("big.bin")
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if _, err := io.Copy(io.Discard, f); err != nil {
+				t.Error(err)
+			}
+			f.Close()
+		})
+		done()
+		t.Logf("%s: %.0f allocs per 1 MiB read (budget %.0f)", c.name, got, c.budget)
+		if got > c.budget {
+			t.Errorf("%s: %.0f allocs per 1 MiB read, budget %.0f", c.name, got, c.budget)
+		}
 	}
 }
