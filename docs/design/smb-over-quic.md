@@ -1,6 +1,6 @@
 # SMB 3.1.1 over QUIC — design
 
-Status: **design, not implemented.** Tracks issue #68.
+Status: **implemented in v0.18.0** (`ListenQUIC`, a QUIC transport with ALPN `smb`; PR #75), with fixes in v0.18.1. Windows interoperability is not yet verified. Tracks issue #68.
 
 Goal: serve SMB 3.1.1 to Windows 11 and Samba clients over QUIC (TLS 1.3 on
 UDP 443), so that a deployment exposes **no TCP 445** to the internet and
