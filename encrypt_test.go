@@ -9,6 +9,19 @@ import (
 	"time"
 )
 
+// dispatchChainNoPanic dispatches a request whose handle does not exist and
+// reports a panic as a failed assertion: without the FILE_CLOSED guard in
+// flush a nil handle is dereferenced, which would end the test binary.
+func dispatchChainNoPanic(t *testing.T, c *conn, m []byte) (out []byte, err error) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("dispatching a request for a missing handle panicked: %v", r)
+		}
+	}()
+	return c.dispatchChain(m)
+}
+
 // ─── AES-CCM ─────────────────────────────────────────────────────────────────
 
 // RFC 3610 section 8, Packet Vector #1 (opened 2026-11-16): the standard's own
@@ -499,10 +512,10 @@ func TestEncryptionRequiredIsEnforced(t *testing.T) {
 			return m
 		}
 		// On the plain share a plain request is a request; on the other it is refused.
-		if out, _ := p.c.dispatchChain(query(6)); statusOf(t, out) == statusAccessDenied {
+		if out, _ := dispatchChainNoPanic(t, p.c, query(6)); statusOf(t, out) == statusAccessDenied {
 			t.Error("a plain request on a plain share was refused")
 		}
-		out, err := p.c.dispatchChain(query(5))
+		out, err := dispatchChainNoPanic(t, p.c, query(5))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -513,7 +526,7 @@ func TestEncryptionRequiredIsEnforced(t *testing.T) {
 		// Encrypted, the same request is dispatched (and fails for a reason of its
 		// own: there is no such handle).
 		m := query(5)
-		out, err = p.c.dispatchChain(p.client.seal(p.sid, m))
+		out, err = dispatchChainNoPanic(t, p.c, p.client.seal(p.sid, m))
 		if err != nil {
 			t.Fatal(err)
 		}

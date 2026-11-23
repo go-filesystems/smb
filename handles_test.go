@@ -444,9 +444,18 @@ func TestCloseAndDeleteOnClose(t *testing.T) {
 		t.Errorf("closing a handle twice answered %#x", st)
 	}
 	// [MS-SMB2] 3.3.5.11: a flush of a handle that is not open is FILE_CLOSED.
-	if st := statusOf(t, mustDispatch(t, c, cmdFlush, make([]byte, 24))); st != statusFileClosed {
-		t.Errorf("flush of a closed handle answered %#x, want STATUS_FILE_CLOSED", st)
-	}
+	// Without the guard the handler dereferences a nil handle: report that as
+	// a failed assertion, not a panic that ends the test binary.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("flush of a closed handle panicked: %v", r)
+			}
+		}()
+		if st := statusOf(t, mustDispatch(t, c, cmdFlush, make([]byte, 24))); st != statusFileClosed {
+			t.Errorf("flush of a closed handle answered %#x, want STATUS_FILE_CLOSED", st)
+		}
+	}()
 	if st := statusOf(t, mustDispatch(t, c, cmdFlush, nil)); st != statusSuccess {
 		t.Error("flush with no body did not answer success")
 	}
