@@ -22,6 +22,16 @@ func capabilitiesFor(dialect uint16) uint32 {
 	return 0
 }
 
+// supportsMultiCredit is Connection.SupportsMultiCredit ([MS-SMB2] 3.3.5.4):
+// TRUE for 2.1 or 3.x "and the underlying connection is either TCP port 445 or
+// RDMA; otherwise, it MUST be set to FALSE". The listener here is the
+// embedder's, on any TCP port, so every non-QUIC transport counts as TCP; QUIC
+// is the transport the rule excludes. The wildcard answer to the legacy
+// greeting (dialect 0 before negotiation) is not multi-credit either.
+func (c *conn) supportsMultiCredit() bool {
+	return c.transport != "quic"
+}
+
 // creditsNeeded is MS-SMB2 3.1.5.2's formula: one credit per 64 KiB of the
 // larger of what the request sends and the most its response may carry.
 //
