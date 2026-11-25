@@ -2,6 +2,9 @@
 # the module, and `git add -A` sweeps it in. Build to /tmp instead.
 /smb
 /cover.out
+# Temp copies mutsweep (go-fleettools/mutate) leaves next to a source file it
+# was mutating when interrupted. One was committed and shipped in v0.17.2.
+.*.atomicwrite-*
 # Anything inside a command's directory that is not source. There is no cmd/
 # here today -- see below -- and the rule stays anyway, because the moment one
 # comes back is exactly the moment nobody is thinking about this file.
