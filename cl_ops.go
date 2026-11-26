@@ -12,9 +12,16 @@ import (
 
 // What a hostile server is not allowed to make the client do.
 const (
-	clMaxDirEntries = 1 << 22 // entries one directory listing may return
-	clDirBuf        = 1 << 20
+	clDirBuf = 1 << 20
+	// clMaxIdleBatches is how many QUERY_DIRECTORY answers in a row may add
+	// nothing to a listing (a batch of "." and ".." only) before the server is
+	// taken to be stalling the walk instead of ending it.
+	clMaxIdleBatches = 16
 )
+
+// clMaxDirEntries is the number of entries one directory listing may return; a
+// variable so a test can lower it.
+var clMaxDirEntries = 1 << 22
 
 var errClientEmptyBatch = errors.New("smb: the server answered QUERY_DIRECTORY with success and no entry")
 
@@ -79,6 +86,7 @@ func (s *ClientShare) ReadDir(ctx context.Context, p string) ([]ClientDirEntry, 
 	defer s.closeID(context.WithoutCancel(ctx), cr.id)
 	out := min(clDirBuf, s.c.maxTrans)
 	var all []ClientDirEntry
+	idle := 0
 	for restart := true; ; restart = false {
 		r, err := s.c.roundTrip(ctx, cmdQueryDirectory, s.tid, creditCharge(int(out)), clQueryDirRequest(cr.id, restart, out), nil, false)
 		if err != nil {
@@ -98,9 +106,7 @@ func (s *ClientShare) ReadDir(ctx context.Context, p string) ([]ClientDirEntry, 
 		if err != nil {
 			return nil, err
 		}
-		if len(es) == 0 {
-			return nil, errClientEmptyBatch
-		}
+		before := len(all)
 		for _, e := range es {
 			if e.Name == "." || e.Name == ".." {
 				continue
@@ -109,6 +115,11 @@ func (s *ClientShare) ReadDir(ctx context.Context, p string) ([]ClientDirEntry, 
 				return nil, errors.New("smb: the directory listing is longer than the client accepts")
 			}
 			all = append(all, e)
+		}
+		if len(all) > before {
+			idle = 0
+		} else if idle++; idle > clMaxIdleBatches {
+			return nil, errClientEmptyBatch
 		}
 	}
 }

@@ -441,18 +441,16 @@ func (c *ClientConn) sessionSetup(ctx context.Context) error {
 		return errors.New("smb: the server gave a guest or anonymous session, not an authenticated one")
 	}
 	key := signingKeyFor(dialect311, nt.exported, pre)
-	if r.h.flags&flagSigned == 0 || !verifyMessage(c.sigAlg, key, r.msg) {
+	// (a response that does not carry the signed flag cannot verify either: the
+	// signature covers the flags)
+	if !verifyMessage(c.sigAlg, key, r.msg) {
 		return errors.New("smb: the final SESSION_SETUP response is not correctly signed")
 	}
 	var enc, dec cipher.AEAD
 	if c.cipherID != cipherNone {
 		bits := cipherKeyBits(c.cipherID)
-		if enc, err = newCipherAEAD(c.cipherID, kdf(nt.exported, "SMBC2SCipherKey\x00", string(pre), bits)); err != nil {
-			return err
-		}
-		if dec, err = newCipherAEAD(c.cipherID, kdf(nt.exported, "SMBS2CCipherKey\x00", string(pre), bits)); err != nil {
-			return err
-		}
+		enc = mustAEAD(c.cipherID, kdf(nt.exported, "SMBC2SCipherKey\x00", string(pre), bits))
+		dec = mustAEAD(c.cipherID, kdf(nt.exported, "SMBS2CCipherKey\x00", string(pre), bits))
 	}
 	c.mu.Lock()
 	c.signKey, c.enc, c.dec = key, enc, dec
@@ -460,6 +458,17 @@ func (c *ClientConn) sessionSetup(ctx context.Context) error {
 	c.ready = true
 	c.mu.Unlock()
 	return nil
+}
+
+// mustAEAD builds the cipher of a negotiated id from a key the KDF sized for it.
+// It can only fail on a mismatch between the two, which is a bug here and not
+// something a server can cause.
+func mustAEAD(id uint16, key []byte) cipher.AEAD {
+	a, err := newCipherAEAD(id, key)
+	if err != nil {
+		panic("smb: client key schedule does not match the negotiated cipher: " + err.Error())
+	}
+	return a
 }
 
 // spnegoInitToken is the NegTokenInit that offers NTLMSSP with its first

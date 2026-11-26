@@ -528,9 +528,6 @@ func clEmptyRequest() []byte { return []byte{4, 0, 0, 0} }
 // would let a caller walk out of the share ("..", a rooted path, NUL), which a
 // server also refuses but which a client must not rely on.
 func clPath(p string) (string, error) {
-	if p == "" {
-		return "", nil
-	}
 	parts := make([]string, 0, 8)
 	start := 0
 	for i := 0; i <= len(p); i++ {

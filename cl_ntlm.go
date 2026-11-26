@@ -133,9 +133,7 @@ func (n *clNTLM) authenticate(chalMsg []byte, c clChallenge) ([]byte, error) {
 	putAV(&info, avEOL, nil)
 
 	var clientNonce [8]byte
-	if _, err := rand.Read(clientNonce[:]); err != nil {
-		return nil, err
-	}
+	rand.Read(clientNonce[:]) // crypto/rand.Read cannot return an error: it ends the program instead
 	stamp := ts
 	if stamp == nil {
 		stamp = filetimeBytes(time.Now())
@@ -171,13 +169,9 @@ func (n *clNTLM) authenticate(chalMsg []byte, c clChallenge) ([]byte, error) {
 	if c.flags&ntlmNegotiateKeyExchange != 0 {
 		flags |= ntlmNegotiateKeyExchange
 		n.exported = make([]byte, 16)
-		if _, err := rand.Read(n.exported); err != nil {
-			return nil, err
-		}
-		rc, err := rc4.NewCipher(baseKey)
-		if err != nil {
-			return nil, err
-		}
+		rand.Read(n.exported)
+		rc, _ := rc4.NewCipher(baseKey) // a 16-byte key is always a valid RC4 key
+
 		encKey = make([]byte, 16)
 		rc.XORKeyStream(encKey, n.exported)
 	}
