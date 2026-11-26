@@ -28,7 +28,7 @@ module github.com/go-filesystems/smb
 go 1.27.4
 
 require (
-	github.com/cloudsoda/go-smb2 v0.0.0-20261105190815-95be04a983b8
+	github.com/go-filesystems/go-smb2 v0.1.0
 	github.com/go-filesystems/hostcopy v0.1.0
 	github.com/go-filesystems/inflight v0.6.0
 	github.com/go-filesystems/interface v0.6.0

@@ -2,14 +2,16 @@
 // any other SMB server: connect, authenticate (pluggable), mount a share, list,
 // size, walk and probe it.
 //
-// The protocol engine is github.com/cloudsoda/go-smb2 (already this module's
-// test dependency, and the client the server is tested against); this package
+// The protocol engine is github.com/go-filesystems/go-smb2, a fork of
+// github.com/cloudsoda/go-smb2 (this module's test client too); this package
 // adds what a tool needs on top of it: a name parser that refuses traversal,
 // credential loading from a mode-checked file or a systemd credential (never
 // from a flag or an environment variable), signing required, a bounded walk,
 // and a connect / tree / read / write probe that names the step that failed.
-// SMB 3.1.1 is negotiated first; the session is encrypted when the server
-// asks for it (session or share flag).
+// SMB 3.1.1 is negotiated first. Encryption is required by default
+// (Options.AllowUnencrypted opts out): the module's own fork of go-smb2,
+// github.com/go-filesystems/go-smb2, adds the Negotiator.RequireEncryption
+// this relies on.
 package client
 
 import (
@@ -22,7 +24,7 @@ import (
 	"strings"
 	"time"
 
-	smb2 "github.com/cloudsoda/go-smb2"
+	smb2 "github.com/go-filesystems/go-smb2"
 )
 
 // Step names the stage of a connection a failure happened in.
@@ -86,6 +88,12 @@ type Options struct {
 	// Limits bounds what a server can make this client hold. Zero fields take
 	// the defaults.
 	Limits Limits
+	// AllowUnencrypted lets the session run without SMB encryption when the
+	// server does not offer it (still signed). The default, false, requires
+	// encryption: every request is sent encrypted whether or not the server
+	// asks, and Dial fails with a StepConnect error wrapping
+	// smb2.ErrEncryptionRequired when the server cannot encrypt.
+	AllowUnencrypted bool
 }
 
 // Limits are the bounds applied to anything a server names.
@@ -148,7 +156,7 @@ func Dial(ctx context.Context, t Target, o Options) (*Session, error) {
 		return nil, &StepError{StepConnect, err}
 	}
 	d := &smb2.Dialer{
-		Negotiator: smb2.Negotiator{RequireMessageSigning: true},
+		Negotiator: smb2.Negotiator{RequireMessageSigning: true, RequireEncryption: !o.AllowUnencrypted},
 		Initiator:  init,
 	}
 	s, err := d.DialConn(ctx, conn, t.Addr())
@@ -162,6 +170,9 @@ func Dial(ctx context.Context, t Target, o Options) (*Session, error) {
 	}
 	return &Session{s: s.WithContext(parent), limits: o.Limits.withDefaults()}, nil
 }
+
+// Encrypted reports whether the session's requests are sent encrypted.
+func (s *Session) Encrypted() bool { return s.s.Encrypted() }
 
 // Close logs off.
 func (s *Session) Close() error { return s.s.Logoff() }

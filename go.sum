@@ -1,5 +1,3 @@
-github.com/cloudsoda/go-smb2 v0.0.0-20261105190815-95be04a983b8 h1:lBnZ8FJ6W+ftjYb3Exp5udAlHLLl5J3wO1nStg6abVI=
-github.com/cloudsoda/go-smb2 v0.0.0-20261105190815-95be04a983b8/go.mod h1:LryNlMPoHo2c2K8tlyI/c0OH8yAryg9wPFvgRGmt2pA=
 github.com/cloudsoda/sddl v0.0.0-20261105185302-1c8f96799263 h1:gua/EcVKg9gnxPrSrvHrz3jwrdnrYHKxmynexDwCrto=
 github.com/cloudsoda/sddl v0.0.0-20261105185302-1c8f96799263/go.mod h1:uvR42Hb/t52HQd7x5/ZLzZEK8oihrFpgnodIJ1vte2E=
 github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
@@ -7,6 +5,8 @@ github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSs
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/geoffgarside/ber v1.1.0 h1:qTmFG4jJbwiSzSXoNJeHcOprVzZ8Ulde2Rrrifu5U9w=
 github.com/geoffgarside/ber v1.1.0/go.mod h1:jVPKeCbj6MvQZhwLYsGwaGI52oUorHoHKNecGT85ZCc=
+github.com/go-filesystems/go-smb2 v0.1.0 h1:ymcTop43ZUMarBeuwDKZbdBRLYANkAabTTRcK/yr6+U=
+github.com/go-filesystems/go-smb2 v0.1.0/go.mod h1:SWukSkyWS4cWsKdR6f4RL5lPSJ2dmcr+ufKcdbntbfk=
 github.com/go-filesystems/hostcopy v0.1.0 h1:eNOy7iGrEe7dGZQ+UhnXJraZsnT+Ht3pP3OIWy69Wq0=
 github.com/go-filesystems/hostcopy v0.1.0/go.mod h1:5HPox1vd9HgHm4tzbem2w3a/QxmM0gyxhFQmKBKMrKI=
 github.com/go-filesystems/inflight v0.6.0 h1:6JoAXtIJD5X2ewj/wf7ZuIrTgoab01VTRXgo6wlpk5o=

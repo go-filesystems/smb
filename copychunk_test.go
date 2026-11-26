@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cloudsoda/go-smb2"
+	"github.com/go-filesystems/go-smb2"
 )
 
 // countingConn counts what the client receives.

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cloudsoda/go-smb2"
+	"github.com/go-filesystems/go-smb2"
 	jasn1 "github.com/jcmturner/gofork/encoding/asn1"
 	"github.com/jcmturner/gokrb5/v8/asn1tools"
 	"github.com/jcmturner/gokrb5/v8/client"

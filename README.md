@@ -206,14 +206,21 @@ smbc check --credentials-file ~/.smbcred //nas/data
   no flag and no environment variable that carries a password. **Not on
   Windows yet**: the mode and owner check has no Windows ACL equivalent, so the
   client refuses every credentials file there rather than read one unchecked.
-- NTLMv2, signing required, SMB 3.1.1 offered first, encrypted when the server
-  asks. Authentication is an interface (`client.Authenticator`); Kerberos plugs
-  in there.
+- NTLMv2, signing required, SMB 3.1.1 offered first, **encryption required**:
+  every request is sent encrypted whether or not the server asks, and a server
+  that cannot encrypt is refused (`smbc` exits `10`, the error wraps
+  `ErrEncryptionRequired`). `--allow-unencrypted` (`Options.AllowUnencrypted`)
+  opts out, stays signed, and prints a warning. Checked against Samba 4.22 with
+  `server smb encrypt = required` and `desired` (`SMB_SAMBA_INTEROP=1 go test
+  -run TestSambaEncryption`, needs docker). Authentication is an interface
+  (`client.Authenticator`); Kerberos plugs in there.
 - Everything a server names is bounded: directory entries, walk size and depth,
   volume sizes (overflow refused), names with separators or `..` dropped.
 
-The protocol engine is [`cloudsoda/go-smb2`](https://github.com/cloudsoda/go-smb2),
-the client this server is already tested against; the client package adds the
+The protocol engine is [`go-filesystems/go-smb2`](https://github.com/go-filesystems/go-smb2),
+our fork of [`cloudsoda/go-smb2`](https://github.com/cloudsoda/go-smb2) (the
+client this server is already tested against) with `Negotiator.RequireEncryption`
+added, which is proposed upstream; the client package adds the
 safe name and credential handling, the bounds and the probe on top of it.
 
 ## Serving one from the command line
