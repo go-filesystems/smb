@@ -93,11 +93,12 @@ func TestClientNegTokenRespMIC(t *testing.T) {
 		t.Fatalf("%x %v", got, err)
 	}
 	for name, b := range map[string][]byte{
-		"empty":         nil,
-		"not a resp":    derCtx(0, derSeq(nil)),
-		"not a seq":     derCtx(1, derOctet(nil)),
-		"cut field":     derCtx(1, derSeq([]byte{0xA3, 0x20, 0x04})),
-		"mic not octet": derCtx(1, derSeq(derCtx(3, derSeq(nil)))),
+		"empty":           nil,
+		"not a resp":      derCtx(0, derSeq(nil)),
+		"not a seq":       derCtx(1, derOctet(nil)),
+		"cut field":       derCtx(1, derSeq([]byte{0xA3, 0x20, 0x04})),
+		"cut other field": derCtx(1, derSeq([]byte{0xA0, 0x20, 0x0A})),
+		"mic not octet":   derCtx(1, derSeq(derCtx(3, derSeq(nil)))),
 	} {
 		if got, err := negTokenRespMIC(b); err == nil {
 			t.Errorf("%s: accepted: %x", name, got)

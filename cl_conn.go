@@ -515,7 +515,7 @@ func spnegoRespToken(ntlm, mic []byte) []byte {
 func negTokenRespMIC(blob []byte) ([]byte, error) {
 	inner, err := derUnwrap(blob, 0xA1)
 	if err != nil {
-		return nil, err
+		inner = nil // the wrong tag is refused by the next unwrap too, so one check below
 	}
 	seq, err := derUnwrap(inner, 0x30)
 	if err != nil {
