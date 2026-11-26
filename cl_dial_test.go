@@ -158,8 +158,8 @@ func TestTheOwnClientEngineRefusesWhatTheSessionSetupGotWrong(t *testing.T) {
 		{"challenge: no token", 1, func(m []byte) []byte {
 			put16(m, 64+6, 0)
 			return m
-		}, "not"},
-		{"challenge: not NTLM", 1, func(m []byte) []byte { m[ntlmAt(t, m)] ^= 1; return m }, ""},
+		}, "SPNEGO"},
+		{"challenge: not NTLM", 1, func(m []byte) []byte { m[ntlmAt(t, m)] ^= 1; return m }, "not an NTLM message"},
 		{"challenge: no unicode", 1, func(m []byte) []byte {
 			i := ntlmAt(t, m)
 			put32(m, i+20, binary.LittleEndian.Uint32(m[i+20:])&^1)

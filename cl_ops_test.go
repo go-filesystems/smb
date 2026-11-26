@@ -170,6 +170,7 @@ func wantStatus(t *testing.T, name string, err error, cmd string, st uint32) {
 }
 
 func TestClientOpsReportEachFailureAsItself(t *testing.T) {
+	defer recovered(t)
 	type op struct {
 		name string
 		run  func(s *ClientShare) error
@@ -219,6 +220,22 @@ func TestClientOpsReportEachFailureAsItself(t *testing.T) {
 		if err := o.run(s); err == nil || transportErr(err) {
 			t.Errorf("%s short body: %v", o.name, err)
 		}
+	}
+}
+
+// A listing whose buffer lies outside the message is a bad field of the
+// response itself, not a short list.
+func TestClientReadDirRefusesABufferOutsideTheMessage(t *testing.T) {
+	_, s := newFake(t, func(r fkReq) (uint32, []byte) {
+		if r.cmd == cmdQueryDirectory {
+			b := fkBody(9, 9)
+			b[2], b[3], b[4] = 0xFF, 0x7F, 10
+			return stOK, b
+		}
+		return stOK, fkCreate(0x10, 0, 1)
+	})
+	if _, err := s.ReadDir(ctx0, "d"); !errors.Is(err, errBadField) {
+		t.Fatalf("%v", err)
 	}
 }
 

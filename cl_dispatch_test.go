@@ -169,6 +169,7 @@ func TestDispatchSignatures(t *testing.T) {
 func (d dispCase) sealed(m []byte) []byte { return d.c.seal(d.c.enc, d.c.sid, m)[4:] }
 
 func TestDispatchEncryption(t *testing.T) {
+	defer recovered(t)
 	m := respMsg(cmdCreate, 5, 0, flagServerToRedir, 0, 1)
 	d := newDisp(t, true, false)
 	if err := d.c.dispatch(d.sealed(m)); err != nil || !d.delivered() {
@@ -211,6 +212,7 @@ func TestDispatchEncryption(t *testing.T) {
 }
 
 func TestRoundTripHonoursACancelledContext(t *testing.T) {
+	defer recovered(t)
 	d := newDisp(t, false, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
