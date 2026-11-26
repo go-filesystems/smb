@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,9 @@ func clientTree(t *testing.T) *memFS {
 
 func credFile(t *testing.T, user, pass string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the credentials-file mode and owner check refuses off unix (documented)")
+	}
 	p := filepath.Join(t.TempDir(), "cred")
 	if err := os.WriteFile(p, []byte("username="+user+"\npassword="+pass+"\n"), 0o600); err != nil {
 		t.Fatal(err)

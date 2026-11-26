@@ -203,7 +203,9 @@ smbc check --credentials-file ~/.smbcred //nas/data
   (mount.cifs format: `username=`, `password=`, `domain=`; refused unless the
   file is yours and mode `0600` or stricter) or `--credential NAME`, which reads
   `$CREDENTIALS_DIRECTORY/NAME` (systemd `LoadCredentialEncrypted=`). There is
-  no flag and no environment variable that carries a password.
+  no flag and no environment variable that carries a password. **Not on
+  Windows yet**: the mode and owner check has no Windows ACL equivalent, so the
+  client refuses every credentials file there rather than read one unchecked.
 - NTLMv2, signing required, SMB 3.1.1 offered first, encrypted when the server
   asks. Authentication is an interface (`client.Authenticator`); Kerberos plugs
   in there.

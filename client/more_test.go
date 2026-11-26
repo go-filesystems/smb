@@ -57,6 +57,7 @@ func TestParseUNCEmptyHost(t *testing.T) {
 }
 
 func TestCredentialsFileNotRegular(t *testing.T) {
+	skipWindows(t)
 	dir := t.TempDir()
 	if _, err := LoadCredentialsFile(dir); err == nil || !strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("a directory: %v", err)

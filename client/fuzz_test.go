@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -80,12 +81,15 @@ func FuzzFsInfoOf(f *testing.F) {
 // recorder keeps every byte the server sent.
 type recorder struct {
 	net.Conn
+	mu  *sync.Mutex
 	got *[]byte
 }
 
 func (r recorder) Read(p []byte) (int, error) {
 	n, err := r.Conn.Read(p)
+	r.mu.Lock()
 	*r.got = append(*r.got, p[:n]...)
+	r.mu.Unlock()
 	return n, err
 }
 
@@ -117,19 +121,24 @@ func FuzzDialHostileServer(f *testing.F) {
 	}
 	go srv.Serve(ln)
 	defer srv.Close()
-	var rec []byte
+	var (
+		rec   []byte
+		recMu sync.Mutex
+	)
 	tg := Target{Host: "127.0.0.1", Port: "445", Share: "x"}
 	o := Options{
 		Auth: NTLM{Credentials: Credentials{User: "alice", Password: "hunter2"}},
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			c, err := (&net.Dialer{}).DialContext(ctx, network, ln.Addr().String())
-			return recorder{c, &rec}, err
+			return recorder{c, &recMu, &rec}, err
 		},
 	}
 	if s, err := Dial(context.Background(), tg, o); err == nil {
 		s.Close()
 	}
-	fr := frames(rec)
+	recMu.Lock()
+	fr := frames(append([]byte(nil), rec...))
+	recMu.Unlock()
 	for len(fr) < 3 {
 		fr = append(fr, nil)
 	}

@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -85,7 +86,15 @@ func sprintAll(c Credentials) string {
 	return fmt.Sprintf("%v %+v %#v %v %s", c, c, c, &c, c)
 }
 
+func skipWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the credentials-file mode and owner check refuses off unix (documented)")
+	}
+}
+
 func TestLoadCredentialsFileRefusals(t *testing.T) {
+	skipWindows(t)
 	dir := t.TempDir()
 	p := filepath.Join(dir, "c")
 	write := func(mode os.FileMode) {
@@ -124,6 +133,7 @@ func TestLoadCredentialsFileRefusals(t *testing.T) {
 }
 
 func TestSystemdCredentialName(t *testing.T) {
+	skipWindows(t)
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "smb"), []byte("username=a\npassword=b\n"), 0o400); err != nil {
 		t.Fatal(err)
