@@ -346,7 +346,7 @@ func (c *ClientConn) negotiate(ctx context.Context) error {
 	ciphers := []uint16{cipherAES128GCM, cipherAES128CCM, cipherAES256GCM, cipherAES256CCM}
 	signs := []uint16{signIDAESGMAC, signIDAESCMAC}
 	ctxs, n := clContexts(salt, ciphers, signs)
-	req := clNegotiateRequest([]uint16{dialect311}, signingEnabled|signingRequired, capLargeMTU, guid, ctxs, n)
+	req := clNegotiateRequest([]uint16{dialect311}, signingEnabled|signingRequired, capLargeMTU|capEncryption, guid, ctxs, n)
 	pre := preauthStart()
 	r, err := c.roundTrip(ctx, cmdNegotiate, 0, 0, req, &pre, true)
 	if err != nil {
@@ -430,14 +430,21 @@ func (c *ClientConn) sessionSetup(ctx context.Context) error {
 	c.mu.Lock()
 	c.sid = r.h.sessionID
 	c.mu.Unlock()
-	r, err = c.roundTrip(ctx, cmdSessionSetup, 0, 1, clSessionSetupRequest(uint8(sec), spnegoRespToken(auth)), &pre, false)
+	r, err = c.roundTrip(ctx, cmdSessionSetup, 0, 1, clSessionSetupRequest(uint8(sec), spnegoRespToken(auth, nt.mechListMIC(clMechTypes()))), &pre, false)
 	if err != nil {
 		return err
 	}
+	return c.finishSession(r, nt, pre)
+}
+
+// finishSession checks the final SESSION_SETUP response (status, not a guest,
+// signed with the key both sides derived, the server's mechListMIC when it sent
+// one) and puts the connection into its protected state.
+func (c *ClientConn) finishSession(r clResult, nt *clNTLM, pre []byte) error {
 	if r.h.status != statusSuccess {
 		return &StatusError{"SESSION_SETUP", r.h.status}
 	}
-	flags, _, err := parseSessionSetupResp(r.msg)
+	flags, secBuf, err := parseSessionSetupResp(r.msg)
 	if err != nil {
 		return err
 	}
@@ -449,6 +456,15 @@ func (c *ClientConn) sessionSetup(ctx context.Context) error {
 	// signature covers the flags)
 	if !verifyMessage(c.sigAlg, key, r.msg) {
 		return errors.New("smb: the final SESSION_SETUP response is not correctly signed")
+	}
+	if len(secBuf) > 0 {
+		mic, err := negTokenRespMIC(secBuf)
+		if err != nil {
+			return err
+		}
+		if mic != nil && !nt.serverMICOK(mic, clMechTypes()) {
+			return errors.New("smb: the server's mechListMIC is wrong")
+		}
 	}
 	var enc, dec cipher.AEAD
 	if c.cipherID != cipherNone {
@@ -478,15 +494,45 @@ func mustAEAD(id uint16, key []byte) cipher.AEAD {
 // spnegoInitToken is the NegTokenInit that offers NTLMSSP with its first
 // message as the optimistic mechToken (RFC 4178 4.2.1).
 func spnegoInitToken(ntlm []byte) []byte {
-	types := derCtx(0, derSeq(derOID(oidNTLMSSP)))
+	types := derCtx(0, clMechTypes())
 	tok := derCtx(2, derOctet(ntlm))
 	init := derCtx(0, derSeq(append(types, tok...)))
 	return derApp(0, append(derOID(oidSPNEGO), init...))
 }
 
-// spnegoRespToken is the NegTokenResp that carries the NTLM AUTHENTICATE.
-func spnegoRespToken(ntlm []byte) []byte {
-	return derCtx(1, derSeq(derCtx(2, derOctet(ntlm))))
+// clMechTypes is the MechTypeList this client offers: the bytes the mechListMIC
+// signs (MS-SPNG 3.1.5.1).
+func clMechTypes() []byte { return derSeq(derOID(oidNTLMSSP)) }
+
+// spnegoRespToken is the NegTokenResp that carries the NTLM AUTHENTICATE and the
+// mechListMIC over the offered mechanisms.
+func spnegoRespToken(ntlm, mic []byte) []byte {
+	return derCtx(1, derSeq(append(derCtx(2, derOctet(ntlm)), derCtx(3, derOctet(mic))...)))
+}
+
+// negTokenRespMIC is the mechListMIC ([3]) of a NegTokenResp, nil when it has
+// none.
+func negTokenRespMIC(blob []byte) ([]byte, error) {
+	inner, err := derUnwrap(blob, 0xA1)
+	if err != nil {
+		return nil, err
+	}
+	seq, err := derUnwrap(inner, 0x30)
+	if err != nil {
+		return nil, err
+	}
+	for len(seq) > 0 {
+		tag := seq[0]
+		content, rest, err := derSplit(seq, tag)
+		if err != nil {
+			return nil, err
+		}
+		if tag == 0xA3 {
+			return derUnwrap(content, 0x04)
+		}
+		seq = rest
+	}
+	return nil, nil
 }
 
 // ─── tree connect ────────────────────────────────────────────────────────────

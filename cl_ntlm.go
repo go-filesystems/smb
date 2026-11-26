@@ -11,6 +11,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -30,6 +31,7 @@ type clNTLM struct {
 	user, password, domain, spn string
 	negotiate                   []byte // type 1, as sent: the MIC covers it
 	exported                    []byte // ExportedSessionKey, set by authenticate
+	keyExch                     bool   // key exchange was negotiated, set by authenticate
 }
 
 func newCLNTLM(user, password, domain, spn string) *clNTLM {
@@ -200,5 +202,38 @@ func (n *clNTLM) authenticate(chalMsg []byte, c clChallenge) ([]byte, error) {
 		h.Write(msg)
 		copy(msg[72:], h.Sum(nil))
 	}
+	n.keyExch = flags&ntlmNegotiateKeyExchange != 0
 	return msg, nil
+}
+
+// ntlmMIC is the NTLMSSP signature of msg at sequence number 0 with the
+// extended-session-security rules of [MS-NLMP] 3.4.4.2, which SPNEGO's
+// mechListMIC ([MS-SPNG] 3.1.5.1) uses: version 1, the first 8 bytes of
+// HMAC_MD5(SigningKey, SeqNum || msg) (encrypted with the sealing key's RC4 when
+// key exchange was negotiated), and the sequence number. toServer picks the
+// direction's keys.
+func ntlmMIC(exported []byte, keyExch, toServer bool, msg []byte) []byte {
+	dir := "server-to-client"
+	if toServer {
+		dir = "client-to-server"
+	}
+	signKey := md5.Sum(append(slices.Clone(exported), "session key to "+dir+" signing key magic constant\x00"...))
+	m := hmac.New(md5.New, signKey[:])
+	m.Write(make([]byte, 4)) // SeqNum 0
+	m.Write(msg)
+	sum := m.Sum(nil)[:8]
+	if keyExch {
+		sealKey := md5.Sum(append(slices.Clone(exported), "session key to "+dir+" sealing key magic constant\x00"...))
+		rc, _ := rc4.NewCipher(sealKey[:]) // 16 bytes: always a valid RC4 key
+		rc.XORKeyStream(sum, sum)
+	}
+	return append(append(binary.LittleEndian.AppendUint32(nil, 1), sum...), 0, 0, 0, 0)
+}
+
+// mechListMIC signs the list of mechanisms this client offered.
+func (n *clNTLM) mechListMIC(list []byte) []byte { return ntlmMIC(n.exported, n.keyExch, true, list) }
+
+// serverMICOK checks the server's mechListMIC over the same list.
+func (n *clNTLM) serverMICOK(mic, list []byte) bool {
+	return hmac.Equal(mic, ntlmMIC(n.exported, n.keyExch, false, list))
 }
