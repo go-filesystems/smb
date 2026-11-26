@@ -177,3 +177,51 @@ func TestReadEntries(t *testing.T) {
 		t.Fatalf("at the bound: %v %v", ents, err)
 	}
 }
+
+var errBoom = errors.New("boom")
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errBoom }
+
+func TestVerifyProbe(t *testing.T) {
+	want := []byte("abcdef")
+	open := func(r io.Reader) func() (io.ReadCloser, error) {
+		return func() (io.ReadCloser, error) { return io.NopCloser(r), nil }
+	}
+	if err := verifyProbe(open(strings.NewReader("abcdef")), want, 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyProbe(func() (io.ReadCloser, error) { return nil, errBoom }, want, 100); !errors.Is(err, errBoom) {
+		t.Errorf("open error: %v", err)
+	}
+	if err := verifyProbe(open(errReader{}), want, 100); !errors.Is(err, errBoom) {
+		t.Errorf("read error: %v", err)
+	}
+	if err := verifyProbe(open(strings.NewReader("abcdeX")), want, 100); err == nil || errors.Is(err, errBoom) {
+		t.Errorf("differing data: %v", err)
+	}
+	// The bound: a server sending more than max bytes is cut at max.
+	if err := verifyProbe(open(strings.NewReader("abcdefgh")), want, 6); err != nil {
+		t.Errorf("cut at max: %v", err)
+	}
+	if err := verifyProbe(open(strings.NewReader("abcdefgh")), want, 8); err == nil {
+		t.Error("longer than written accepted")
+	}
+}
+
+func TestRemoveProbe(t *testing.T) {
+	gone := func() error { return os.ErrNotExist }
+	if err := removeProbe("p", func() error { return nil }, gone); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeProbe("p", func() error { return errBoom }, gone); !errors.Is(err, errBoom) {
+		t.Errorf("remove error: %v", err)
+	}
+	if err := removeProbe("p", func() error { return nil }, func() error { return nil }); err == nil || !strings.Contains(err.Error(), "still there") {
+		t.Errorf("kept file: %v", err)
+	}
+	if err := removeProbe("p", func() error { return nil }, func() error { return errBoom }); err == nil {
+		t.Error("an unreadable stat counted as gone")
+	}
+}

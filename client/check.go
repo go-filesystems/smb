@@ -121,19 +121,7 @@ func Check(ctx context.Context, t Target, o Options) Report {
 		return nil
 	})
 	run(StepWriteVerify, func() error {
-		f, err := share.sh.Open(probe)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		got, err := io.ReadAll(io.LimitReader(f, share.limits.MaxProbeRead))
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(got, probeData) {
-			return fmt.Errorf("read back %d bytes that differ from the %d written", len(got), len(probeData))
-		}
-		return nil
+		return verifyProbe(func() (io.ReadCloser, error) { return share.sh.Open(probe) }, probeData, share.limits.MaxProbeRead)
 	})
 	// The delete runs even when the verify failed, so a probe file is not left
 	// behind; it is reported skipped only when nothing was ever created.
@@ -141,14 +129,40 @@ func Check(ctx context.Context, t Target, o Options) Report {
 		fail = false
 	}
 	run(StepWriteDelete, func() error {
-		if err := share.sh.Remove(probe); err != nil {
+		return removeProbe(probe, func() error { return share.sh.Remove(probe) }, func() error {
+			_, err := share.sh.Stat(probe)
 			return err
-		}
-		// A server may acknowledge a delete and keep the file: ask.
-		if _, err := share.sh.Stat(probe); !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("%s is still there after its delete (stat: %v)", probe, err)
-		}
-		return nil
+		})
 	})
 	return r
+}
+
+// verifyProbe reads the probe back (at most max bytes, whatever the server
+// sends) and compares it with what was written.
+func verifyProbe(open func() (io.ReadCloser, error), want []byte, max int64) error {
+	f, err := open()
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	got, err := io.ReadAll(io.LimitReader(f, max))
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(got, want) {
+		return fmt.Errorf("read back %d bytes that differ from the %d written", len(got), len(want))
+	}
+	return nil
+}
+
+// removeProbe deletes the probe and then asks for it: a server may acknowledge
+// a delete and keep the file.
+func removeProbe(name string, remove, stat func() error) error {
+	if err := remove(); err != nil {
+		return err
+	}
+	if err := stat(); !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%s is still there after its delete (stat: %v)", name, err)
+	}
+	return nil
 }

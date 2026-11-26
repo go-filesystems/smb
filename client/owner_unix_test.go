@@ -65,14 +65,18 @@ func TestReadCredentialsFailures(t *testing.T) {
 		t.Fatalf("%v %v", c, err)
 	}
 	cases := map[string]openFile{
-		"stat fails":    fakeFile{statErr: errors.New("boom")},
-		"read fails":    fakeFile{info: mine, readErr: errors.New("boom")},
+		"stat fails":    fakeFile{statErr: errBoom},
+		"read fails":    fakeFile{info: mine, readErr: errBoom},
 		"foreign owner": bodyFile{fakeFile{info: fakeInfo{&syscall.Stat_t{Uid: me + 1}}}, strings.NewReader("username=u\n")},
 		"bad content":   bodyFile{fakeFile{info: mine}, strings.NewReader("bogus=1\n")},
 	}
 	for name, f := range cases {
-		if _, err := readCredentials(f, "f"); err == nil {
+		_, err := readCredentials(f, "f")
+		if err == nil {
 			t.Errorf("%s: accepted", name)
+		}
+		if strings.HasSuffix(name, "fails") && !errors.Is(err, errBoom) {
+			t.Errorf("%s: the cause is lost: %v", name, err)
 		}
 	}
 }
