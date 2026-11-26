@@ -70,6 +70,7 @@ func Main() {
 type common struct {
 	credFile, cred string
 	timeout        time.Duration
+	allowPlain     bool
 }
 
 func (c *common) options() (client.Options, error) {
@@ -86,7 +87,7 @@ func (c *common) options() (client.Options, error) {
 	if err != nil {
 		return client.Options{}, &ExitError{ExitUsage, err}
 	}
-	return client.Options{Auth: client.NTLM{Credentials: cr}, ConnectTimeout: c.timeout}, nil
+	return client.Options{Auth: client.NTLM{Credentials: cr}, ConnectTimeout: c.timeout, AllowUnencrypted: c.allowPlain}, nil
 }
 
 // open parses the name, dials and mounts.
@@ -102,6 +103,9 @@ func (c *common) open(cmd *cobra.Command, name string) (client.Target, *client.S
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if c.allowPlain {
+		fmt.Fprintln(cmd.ErrOrStderr(), "smbc: warning: --allow-unencrypted: SMB encryption is not required, the data may cross the network in the clear (signed only)")
 	}
 	s, err := client.Dial(ctx, t, o)
 	if err != nil {
@@ -147,8 +151,9 @@ func RootCmd() *cobra.Command {
 		Short:         "SMB2/3 client: ls, df, du, check",
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Long: `smbc talks SMB 2/3 (NTLMv2, signing required, SMB 3.1.1 preferred, encrypted
-when the server asks for it).
+		Long: `smbc talks SMB 2/3 (NTLMv2, signing required, SMB 3.1.1 preferred, encryption
+required: every request is sent encrypted, and a server that cannot encrypt is
+refused unless --allow-unencrypted is given, which warns).
 
 Credentials: --credentials-file PATH (mount.cifs format: username=, password=,
 domain=; mode 0600 or stricter, owned by you) or --credential NAME (reads
@@ -159,6 +164,7 @@ is no flag or environment variable that carries a password.`,
 	pf.StringVar(&c.credFile, flagCredFile, "", "credentials file (mount.cifs format, mode 0600)")
 	pf.StringVar(&c.cred, flagCredSystemd, "", "systemd credential name, read from $CREDENTIALS_DIRECTORY")
 	pf.DurationVar(&c.timeout, "connect-timeout", defaultTimeout, "bound on connect, negotiate and authenticate")
+	pf.BoolVar(&c.allowPlain, "allow-unencrypted", false, "do not require SMB encryption (signed only); warns")
 	root.AddCommand(lsCmd(c), dfCmd(c), duCmd(c), checkCmd(c))
 	return root
 }
