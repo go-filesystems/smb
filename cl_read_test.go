@@ -236,6 +236,20 @@ func TestClientFetchDoesNotCopyAWholeAnswer(t *testing.T) {
 	}
 }
 
+func TestClientAccumulateKeepsAWholeReplyAndCopiesTheRest(t *testing.T) {
+	data := []byte{1, 2, 3, 4}
+	if got := accumulate(nil, data, 4); &got[0] != &data[0] {
+		t.Error("a whole reply was copied")
+	}
+	if got := accumulate(nil, data, 6); !bytes.Equal(got, data) || &got[0] == &data[0] {
+		t.Errorf("a partial first reply: %v", got)
+	}
+	prev := make([]byte, 2, 8)
+	if got := accumulate(prev, data[:2], 4); !bytes.Equal(got, []byte{0, 0, 1, 2}) {
+		t.Errorf("a second reply: %v", got)
+	}
+}
+
 func TestClientReadFrameBulkAllocatesOnceAndKeepsTheBound(t *testing.T) {
 	body := rdData(300 << 10)
 	frame := binary.BigEndian.AppendUint32(nil, uint32(len(body)))

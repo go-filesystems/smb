@@ -212,12 +212,19 @@ func (f *ClientFile) fetch(ctx context.Context, off int64, want int) ([]byte, er
 		if len(data) == 0 {
 			return out, nil
 		}
-		if out == nil && len(data) == want {
-			return data, nil
-		}
-		out = append(out, data...)
+		out = accumulate(out, data, want)
 	}
 	return out, nil
+}
+
+// accumulate adds one reply to what a fetch has so far. A reply that is the
+// whole of what was wanted is kept as it is, with no copy of a piece that can
+// be 2 MiB; anything else is appended.
+func accumulate(out, data []byte, want int) []byte {
+	if out == nil && len(data) == want {
+		return data
+	}
+	return append(out, data...)
 }
 
 // ReadAt fills p from offset off, with the pieces of a large p read
