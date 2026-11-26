@@ -229,8 +229,9 @@ safe name and credential handling, the bounds and the probe on top of it.
 SMB 3.1.1 only, negotiate with preauth integrity, encryption and signing
 contexts, NTLMv2 with the SPNEGO mechListMIC, tree connect, create, query-info,
 query-directory, read, close. **Encryption is required** unless
-`ClientOptions.AllowUnencrypted` is set. It is measured against go-smb2 by
-`internal/engbench` (Samba 4.22 in a container, `smb encrypt = required`):
+`ClientOptions.AllowUnencrypted` is set. It was measured against go-smb2 with a
+throwaway harness (not in this repository: it is a measuring tool, with no
+guard tests) against Samba 4.22 in a container, `smb encrypt = required`:
 dialect 0x311, AES-128-GCM, AES-128-GMAC signing interoperate.
 
 | One round, Samba 4.22, encrypted | go-smb2 (v0.19.0) | own engine |
