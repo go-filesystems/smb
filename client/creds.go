@@ -41,6 +41,16 @@ func LoadCredentialsFile(path string) (Credentials, error) {
 		return Credentials{}, fmt.Errorf("credentials file: %w", err)
 	}
 	defer f.Close()
+	return readCredentials(f, path)
+}
+
+// openFile is what readCredentials needs of the open descriptor.
+type openFile interface {
+	io.Reader
+	Stat() (os.FileInfo, error)
+}
+
+func readCredentials(f openFile, path string) (Credentials, error) {
 	fi, err := f.Stat()
 	if err != nil {
 		return Credentials{}, fmt.Errorf("credentials file %s: %w", path, err)

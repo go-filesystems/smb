@@ -90,9 +90,6 @@ func (w *walker) dir(ctx context.Context, path string, depth int) int64 {
 		w.fail(fmt.Errorf("%s: %w (%d)", path, ErrTooDeep, w.sh.limits.MaxDepth))
 		return 0
 	}
-	if ctx.Err() != nil {
-		return 0
-	}
 	w.sem <- struct{}{}
 	ents, err := w.sh.ReadDir(path)
 	<-w.sem

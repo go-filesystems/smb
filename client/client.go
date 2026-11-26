@@ -218,15 +218,26 @@ func (sh *Share) ReadDir(path string) ([]Entry, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return readEntries(f, path, sh.limits.MaxDirEntries)
+}
+
+type dirReader interface {
+	Readdir(n int) ([]os.FileInfo, error)
+}
+
+// readEntries drains d. It stops at io.EOF, at an empty batch (a server that
+// answers success with nothing must not make this loop for ever) and at max
+// entries.
+func readEntries(d dirReader, path string, max int) ([]Entry, error) {
 	var out []Entry
 	for {
-		fis, err := f.Readdir(512)
+		fis, err := d.Readdir(512)
 		for _, fi := range fis {
 			if !validName(fi.Name()) {
 				continue
 			}
-			if len(out) >= sh.limits.MaxDirEntries {
-				return out, fmt.Errorf("%s: %w (%d)", path, ErrTooMany, sh.limits.MaxDirEntries)
+			if len(out) >= max {
+				return out, fmt.Errorf("%s: %w (%d)", path, ErrTooMany, max)
 			}
 			size := fi.Size()
 			if size < 0 {

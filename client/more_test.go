@@ -3,12 +3,14 @@ package client
 import (
 	"context"
 	"errors"
+	"io"
 	"math"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type failAuth struct{}
@@ -115,5 +117,63 @@ func TestAddSatSaturates(t *testing.T) {
 	}
 	if got := addSat(3, -4); got != -1 {
 		t.Fatalf("got %d", got)
+	}
+}
+
+type batchDir struct {
+	batches [][]os.FileInfo
+	err     error
+	calls   int
+}
+
+func (b *batchDir) Readdir(int) ([]os.FileInfo, error) {
+	b.calls++
+	if b.calls > 100 {
+		return nil, io.EOF // the test's own bound: a loop would be reported below
+	}
+	if len(b.batches) == 0 {
+		return nil, b.err
+	}
+	x := b.batches[0]
+	b.batches = b.batches[1:]
+	return x, nil
+}
+
+type nameInfo struct {
+	fakeName string
+}
+
+func (n nameInfo) Name() string     { return n.fakeName }
+func (nameInfo) Size() int64        { return -5 }
+func (nameInfo) Mode() os.FileMode  { return 0 }
+func (nameInfo) ModTime() time.Time { return time.Time{} }
+func (nameInfo) IsDir() bool        { return false }
+func (nameInfo) Sys() any           { return nil }
+
+func TestReadEntries(t *testing.T) {
+	// An empty batch with no error ends the listing.
+	d := &batchDir{}
+	if ents, err := readEntries(d, "p", 10); err != nil || len(ents) != 0 || d.calls != 1 {
+		t.Fatalf("empty batch: %v %v calls=%d", ents, err, d.calls)
+	}
+	// io.EOF after entries ends it too, keeping the entries; a size below zero reads as 0.
+	d = &batchDir{batches: [][]os.FileInfo{{nameInfo{"a"}, nameInfo{"../x"}, nameInfo{"b"}}}, err: io.EOF}
+	ents, err := readEntries(d, "p", 10)
+	if err != nil || len(ents) != 2 || ents[0].Size != 0 {
+		t.Fatalf("%v %v", ents, err)
+	}
+	// Another error is returned with what was read.
+	d = &batchDir{batches: [][]os.FileInfo{{nameInfo{"a"}}}, err: errors.New("boom")}
+	if ents, err := readEntries(d, "p", 10); err == nil || len(ents) != 1 {
+		t.Fatalf("%v %v", ents, err)
+	}
+	// The bound is on kept entries.
+	d = &batchDir{batches: [][]os.FileInfo{{nameInfo{"a"}, nameInfo{"b"}, nameInfo{"c"}}}, err: io.EOF}
+	if _, err := readEntries(d, "p", 2); !errors.Is(err, ErrTooMany) {
+		t.Fatalf("%v", err)
+	}
+	d = &batchDir{batches: [][]os.FileInfo{{nameInfo{"a"}, nameInfo{"b"}}}, err: io.EOF}
+	if ents, err := readEntries(d, "p", 2); err != nil || len(ents) != 2 {
+		t.Fatalf("at the bound: %v %v", ents, err)
 	}
 }

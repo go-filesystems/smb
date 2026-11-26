@@ -254,8 +254,12 @@ func TestClientDuIsBounded(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err = sh.Du(ctx, "", client.DuOptions{})
-		if err == nil {
-			t.Errorf("%s: no error", name)
+		want := client.ErrTooMany
+		if name == "depth" {
+			want = client.ErrTooDeep
+		}
+		if !errors.Is(err, want) {
+			t.Errorf("%s: got %v, want %v", name, err, want)
 		}
 		sh.Close()
 		s.Close()

@@ -100,9 +100,6 @@ func Check(ctx context.Context, t Target, o Options) Report {
 		defer share.Close()
 	}
 	run(StepRead, func() error {
-		if _, err := share.sh.Stat(t.Path); err != nil {
-			return err
-		}
 		if _, err := share.ReadDir(t.Path); err != nil && !errors.Is(err, ErrTooMany) {
 			return err
 		}
@@ -144,8 +141,12 @@ func Check(ctx context.Context, t Target, o Options) Report {
 		fail = false
 	}
 	run(StepWriteDelete, func() error {
-		if err := share.sh.Remove(probe); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := share.sh.Remove(probe); err != nil {
 			return err
+		}
+		// A server may acknowledge a delete and keep the file: ask.
+		if _, err := share.sh.Stat(probe); !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%s is still there after its delete (stat: %v)", probe, err)
 		}
 		return nil
 	})
