@@ -298,6 +298,14 @@ func TestClientDirEntryBounds(t *testing.T) {
 	if _, err := parseDirEntries(in); err == nil {
 		t.Error("next inside the name")
 	}
+	// the next record starting inside the name of this one, laid out so that
+	// every field it then reads is valid: only the overlap is wrong
+	overlap := make([]byte, 128)
+	binary.LittleEndian.PutUint32(overlap, 64)
+	binary.LittleEndian.PutUint32(overlap[60:], 4)
+	if got, err := parseDirEntries(overlap); err == nil {
+		t.Errorf("overlapping records accepted: %+v", got)
+	}
 	// next of zero for the last only; next pointing past the buffer
 	past := append([]byte(nil), two...)
 	binary.LittleEndian.PutUint32(past, uint32(len(two)+1))

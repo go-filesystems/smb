@@ -3,6 +3,9 @@ package smb
 import (
 	"context"
 	"encoding/binary"
+	"errors"
+	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -79,16 +82,19 @@ func TestDispatchCapsTheCreditsAServerCanGrant(t *testing.T) {
 }
 
 func TestDispatchRefusesWhatBreaksTheRules(t *testing.T) {
-	for name, m := range map[string][]byte{
-		"not a response":    respMsg(cmdCreate, 5, 0, 0, 0, 1),
-		"compounded":        respMsg(cmdCreate, 5, 0, flagServerToRedir, 128, 1),
-		"wrong command":     respMsg(cmdRead, 5, 0, flagServerToRedir, 0, 1),
-		"short":             respMsg(cmdCreate, 5, 0, flagServerToRedir, 0, 1)[:40],
-		"unsigned response": respMsg(cmdCreate, 5, 0, flagServerToRedir, 0, 1),
+	for name, tc := range map[string]struct {
+		m    []byte
+		want string
+	}{
+		"not a response":    {respMsg(cmdCreate, 5, 0, 0, 0, 1), "not a response"},
+		"compounded":        {respMsg(cmdCreate, 5, 0, flagServerToRedir, 128, 1), "compounded"},
+		"wrong command":     {respMsg(cmdRead, 5, 0, flagServerToRedir, 0, 1), "answered with"},
+		"short":             {respMsg(cmdCreate, 5, 0, flagServerToRedir, 0, 1)[:40], "shorter than a header"},
+		"unsigned response": {respMsg(cmdCreate, 5, 0, flagServerToRedir, 0, 1), "signature"},
 	} {
 		d := newDisp(t, false, name == "unsigned response")
-		if err := d.c.dispatch(m); err == nil {
-			t.Errorf("%s: accepted", name)
+		if err := d.c.dispatch(tc.m); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v, want %q", name, err, tc.want)
 		}
 		if d.delivered() {
 			t.Errorf("%s: delivered", name)
@@ -101,8 +107,12 @@ func TestDispatchIgnoresWhatAnswersNothing(t *testing.T) {
 	if err := d.c.dispatch(respMsg(cmdCreate, 99, 0, flagServerToRedir, 0, 1)); err != nil {
 		t.Fatalf("an answer to nothing: %v", err)
 	}
-	if err := d.c.dispatch(respMsg(cmdOplockBreak, ^uint64(0), 0, flagServerToRedir, 0, 0)); err != nil {
+	before := d.c.credits
+	if err := d.c.dispatch(respMsg(cmdOplockBreak, ^uint64(0), 0, flagServerToRedir, 0, 40)); err != nil {
 		t.Fatalf("an unsolicited break: %v", err)
+	}
+	if d.c.credits != before {
+		t.Fatalf("an unsolicited break granted credits: %d", d.c.credits)
 	}
 	if d.delivered() || len(d.c.pending) != 1 {
 		t.Fatal("the pending request was disturbed")
@@ -166,16 +176,16 @@ func TestDispatchEncryption(t *testing.T) {
 	}
 	// a plaintext answer to an encrypted request is a downgrade
 	d = newDisp(t, true, false)
-	if err := d.c.dispatch(m); err == nil || d.delivered() {
-		t.Fatal("plaintext accepted where encryption was in force")
+	if err := d.c.dispatch(m); err == nil || d.delivered() || !strings.Contains(err.Error(), "protection differs") {
+		t.Fatalf("plaintext where encryption was in force: %v", err)
 	}
 	// an encrypted answer to a request that was signed
 	e := newDisp(t, true, false)
 	f := e.sealed(m)
 	d = newDisp(t, false, true)
 	d.c.dec = e.c.dec
-	if err := d.c.dispatch(f); err == nil {
-		t.Fatal("encrypted answer accepted for an unencrypted request")
+	if err := d.c.dispatch(f); err == nil || !strings.Contains(err.Error(), "protection differs") {
+		t.Fatalf("encrypted answer for an unencrypted request: %v", err)
 	}
 	for name, mut := range map[string]func(f []byte) []byte{
 		"tag":         func(f []byte) []byte { f[offTrSignature] ^= 1; return f },
@@ -187,16 +197,16 @@ func TestDispatchEncryption(t *testing.T) {
 		"header only": func(f []byte) []byte { return f[:transformLen] },
 	} {
 		d = newDisp(t, true, false)
-		if err := d.c.dispatch(mut(d.sealed(m))); err == nil || d.delivered() {
-			t.Errorf("%s: accepted", name)
+		if err := d.c.dispatch(mut(d.sealed(m))); !errors.Is(err, errTransform) || d.delivered() {
+			t.Errorf("%s: %v", name, err)
 		}
 	}
 	// no key: a transform header cannot be read at all
 	d = newDisp(t, true, false)
 	fr := d.sealed(m)
 	d.c.dec = nil
-	if err := d.c.dispatch(fr); err == nil {
-		t.Fatal("encrypted frame accepted with no decryption key")
+	if err := d.c.dispatch(fr); !errors.Is(err, errTransform) {
+		t.Fatalf("encrypted frame with no decryption key: %v", err)
 	}
 }
 
@@ -204,9 +214,13 @@ func TestRoundTripHonoursACancelledContext(t *testing.T) {
 	d := newDisp(t, false, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
+	a, b := net.Pipe() // a connection that is shut: anything that gets as far as sending fails with another error
+	a.Close()
+	b.Close()
+	d.c.nc = a
 	d.c.credits = 0 // no credit to send with: it must wait, then give up
-	if _, err := d.c.roundTrip(ctx, cmdEcho, 0, 1, clEmptyRequest(), nil, false); err == nil {
-		t.Fatal("no error")
+	if _, err := d.c.roundTrip(ctx, cmdEcho, 0, 1, clEmptyRequest(), nil, false); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("waiting for credit: %v", err)
 	}
 	if len(d.c.pending) != 1 {
 		t.Fatalf("pending %d", len(d.c.pending))

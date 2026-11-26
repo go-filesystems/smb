@@ -185,6 +185,10 @@ func TestTheOwnClientEngineRefusesWhatTheSessionSetupGotWrong(t *testing.T) {
 		if tc.want != "" {
 			wantErr(t, tc.name, err, tc.want)
 		}
+		var se *fssmb.StatusError
+		if strings.HasSuffix(tc.name, "status") != errors.As(err, &se) {
+			t.Errorf("%s: a status error is expected exactly for the status cases: %v", tc.name, err)
+		}
 		if tc.name == "challenge: no token" || tc.name == "challenge: not NTLM" {
 			// whatever it is, it is refused before a credential is sent and is not
 			// a mere failure of the exchange
@@ -207,6 +211,9 @@ func TestTheOwnClientEngineReportsAConnectionCutAtEachStage(t *testing.T) {
 		})
 		if err == nil {
 			t.Fatalf("cut at %d: dialled", n)
+		}
+		if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, net.ErrClosed) && !errors.As(err, new(net.Error)) {
+			t.Errorf("cut at %d: not a transport error: %v", n, err)
 		}
 		for _, bad := range []string{"shorter than its structure", "points outside", "not an NTLM", "SESSION_SETUP", "NEGOTIATE", "signed"} {
 			if strings.Contains(err.Error(), bad) {

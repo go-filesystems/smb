@@ -473,7 +473,12 @@ func TestClientReadAt(t *testing.T) {
 	}
 	// success with no data is the end of the file, not a reason to ask again
 	asked := 0
-	_, s = newFake(t, fkFile(func(off uint64, n uint32) (uint32, []byte) { asked++; return stOK, fkRead(nil) }))
+	_, s = newFake(t, fkFile(func(off uint64, n uint32) (uint32, []byte) {
+		if asked++; asked > 3 { // a client that asks again would never stop
+			return fkDrop, nil
+		}
+		return stOK, fkRead(nil)
+	}))
 	f, _ = s.Open(ctx0, "a")
 	if n, err := f.ReadAt(make([]byte, 5), 0); n != 0 || err != io.EOF || asked != 1 {
 		t.Fatalf("%d %v after %d requests", n, err, asked)
@@ -513,11 +518,15 @@ func TestClientWriteFile(t *testing.T) {
 		"exactly n":    func(n uint32) uint32 { return n },
 		"a single one": func(n uint32) uint32 { return 1 },
 	} {
+		writes := 0
 		_, s := newFake(t, func(r fkReq) (uint32, []byte) {
 			switch r.cmd {
 			case cmdCreate:
 				return stOK, fkCreate(0x20, 0, 1)
 			case cmdWrite:
+				if writes++; writes > 10 { // a client that asks again would never stop
+					return fkDrop, nil
+				}
 				return stOK, fkWrite(w(binary.LittleEndian.Uint32(r.body[4:])))
 			}
 			return stOK, fkBody(60, 60)
@@ -578,7 +587,8 @@ func TestClientMount(t *testing.T) {
 func TestClientDialNeedsAUser(t *testing.T) {
 	a, b := net.Pipe()
 	defer b.Close()
-	if _, err := ClientDial(ctx0, a, ClientOptions{Password: "x"}); err == nil {
-		t.Fatal("dialled without a user")
+	go func() { time.Sleep(300 * time.Millisecond); b.Close() }() // a dial that goes on would wait for a server
+	if _, err := ClientDial(ctx0, a, ClientOptions{Password: "x"}); err == nil || !strings.Contains(err.Error(), "no user name") {
+		t.Fatalf("dialled without a user: %v", err)
 	}
 }

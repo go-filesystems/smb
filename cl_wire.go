@@ -443,7 +443,7 @@ func fileTime(ft uint64) time.Time {
 func parseDirEntries(b []byte) ([]ClientDirEntry, error) {
 	var out []ClientDirEntry
 	off := 0
-	for {
+	for more := true; more; {
 		if off > len(b)-64 {
 			return out, errShort
 		}
@@ -462,11 +462,10 @@ func parseDirEntries(b []byte) ([]ClientDirEntry, error) {
 			sz = 0
 		}
 		out = append(out, ClientDirEntry{name, int64(sz), le32(e[56:]), fileTime(le64(e[24:]))})
-		if next == 0 {
-			return out, nil
-		}
+		more = next != 0
 		off += next
 	}
+	return out, nil
 }
 
 func clU16s(b []byte) []uint16 {

@@ -1,8 +1,10 @@
 package smb
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestClientResponseDecodersRefuseShortBodies(t *testing.T) {
@@ -81,10 +83,14 @@ func TestClientConnectionEndsOnAProtocolViolation(t *testing.T) {
 	if _, err := s.Stat(ctx0, "a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Statfs(ctx0); err == nil || !transportErr(err) {
+	// (a deadline, so that a connection that goes on waiting fails by this
+	// assertion and not by the test binary's timeout)
+	dl, cancel := context.WithTimeout(ctx0, 3*time.Second)
+	defer cancel()
+	if _, err := s.Statfs(dl); err == nil || !transportErr(err) || errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("a response to the wrong command: %v", err)
 	}
-	if _, err := s.Stat(ctx0, "a"); err == nil {
+	if _, err := s.Stat(dl, "a"); err == nil || errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal("the connection survived")
 	}
 }

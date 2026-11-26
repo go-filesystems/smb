@@ -212,10 +212,14 @@ func (c *ClientConn) dispatch(frame []byte) error {
 	defer c.mu.Unlock()
 	c.credits = min(c.credits+int(h.credits), clCreditsMax)
 	c.cond.Broadcast()
-	p := c.pending[h.messageID]
-	if p == nil {
-		return nil // an answer to nothing we wait for (a cancelled request)
+	if p := c.pending[h.messageID]; p != nil {
+		return c.deliver(p, h, frame, enc)
 	}
+	return nil // an answer to nothing we wait for (a cancelled request)
+}
+
+// deliver hands a checked response to the request it answers; c.mu is held.
+func (c *ClientConn) deliver(p *clPending, h header, frame []byte, enc bool) error {
 	if h.command != p.cmd {
 		return fmt.Errorf("smb: %s answered with %s", p.cmd, h.command)
 	}
