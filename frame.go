@@ -25,7 +25,12 @@ const (
 )
 
 // readFrame returns one message body, without its length header.
-func readFrame(r io.Reader) ([]byte, error) {
+func readFrame(r io.Reader) ([]byte, error) { return readFrameMax(r, maxMessageLen) }
+
+// readFrameMax is readFrame with the bound given by the caller: the client
+// engine learns a smaller one from the negotiate and refuses a server that
+// exceeds it.
+func readFrameMax(r io.Reader, maxLen int) ([]byte, error) {
 	var hdr [frameHeaderLen]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return nil, err
@@ -37,8 +42,8 @@ func readFrame(r io.Reader) ([]byte, error) {
 	if n == 0 {
 		return nil, fmt.Errorf("smb: empty message")
 	}
-	if n > maxMessageLen {
-		return nil, fmt.Errorf("smb: message of %d bytes is larger than the %d-byte limit", n, maxMessageLen)
+	if n > maxLen {
+		return nil, fmt.Errorf("smb: message of %d bytes is larger than the %d-byte limit", n, maxLen)
 	}
 	// The buffer follows the bytes that arrive, doubling at most, rather than
 	// the length the header announces: four bytes saying 8 MiB used to cost
