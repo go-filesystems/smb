@@ -2,7 +2,9 @@
 
 // Package smb implements an SMB2 server that exports any
 // [github.com/go-filesystems/interface.Filesystem], in pure Go with
-// CGO_ENABLED=0 and no dependency outside the standard library.
+// CGO_ENABLED=0 and no dependency outside the standard library. The client
+// (package [github.com/go-filesystems/smb/client] and the smbc command) lives
+// in its own sub-package and keeps this one free of its dependencies.
 //
 // It is the sibling of go-filesystems/nfs, /webdav and /sftp, and the one they
 // cannot replace: SMB is what Windows speaks natively — its NFS client is an
