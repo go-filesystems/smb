@@ -137,7 +137,7 @@ func u16le(v ...uint16) []byte {
 func TestClientServerContextBounds(t *testing.T) {
 	defer recovered(t)
 	const off = headerLen + 64
-	pre := ctxRaw(ctxPreauthIntegrity, append(u16le(1, 0, hashIDSHA512)))
+	pre := ctxRaw(ctxPreauthIntegrity, u16le(1, 0, hashIDSHA512))
 	preSalt := ctxRaw(ctxPreauthIntegrity, append(u16le(1, 2, hashIDSHA512), 9, 9))
 	enc := ctxRaw(ctxEncryption, u16le(1, cipherAES128GCM))
 	sig := ctxRaw(ctxSigning, u16le(1, signIDAESCMAC))
