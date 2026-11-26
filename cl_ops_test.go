@@ -76,7 +76,10 @@ func newFake(t *testing.T, answer fkAnswer) (*ClientConn, *ClientShare) {
 			}
 		}
 	}()
-	t.Cleanup(func() { c.Close() })
+	// a client that waits for an answer that will not come fails by an
+	// assertion on its error, not by the test binary's timeout
+	dog := time.AfterFunc(3*time.Second, func() { c.fail(errors.New("fake: no answer within 3s")) })
+	t.Cleanup(func() { dog.Stop(); c.Close() })
 	return c, &ClientShare{c: c, tid: 9, name: "s"}
 }
 

@@ -228,7 +228,9 @@ func TestRoundTripHonoursACancelledContext(t *testing.T) {
 		t.Fatalf("pending %d", len(d.c.pending))
 	}
 	d.c.err = context.Canceled
-	if _, err := d.c.roundTrip(context.Background(), cmdEcho, 0, 1, clEmptyRequest(), nil, false); err != context.Canceled {
+	wait, stop := context.WithTimeout(context.Background(), 2*time.Second) // a request that was sent would wait for an answer
+	defer stop()
+	if _, err := d.c.roundTrip(wait, cmdEcho, 0, 1, clEmptyRequest(), nil, false); err != context.Canceled {
 		t.Fatalf("on a dead connection: %v", err)
 	}
 }
