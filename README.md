@@ -178,6 +178,44 @@ with the NFS and SFTP servers. A client that sends half a frame and stops
 holds its slot and token for at most
 `Server.RecordTimeout` (30 s), and then loses the connection.
 
+## `smbc`, the client
+
+The module also holds an SMB2/3 **client**: the package
+`github.com/go-filesystems/smb/client` and the command `smbc`.
+
+```sh
+go install github.com/go-filesystems/smb/cmd/smbc@latest
+
+smbc ls    --credentials-file ~/.smbcred //nas/data/photos
+smbc df    --credentials-file ~/.smbcred --human-readable //nas/data
+smbc du    --credentials-file ~/.smbcred --summarize --human-readable //nas/data/photos
+smbc check --credentials-file ~/.smbcred //nas/data
+```
+
+- `df` asks `FileFsFullSizeInformation` (MS-FSCC 2.5.4); `du` is the apparent
+  size, summed over concurrent directory listings (`--jobs`), symlinks never
+  followed.
+- `check` connects, authenticates, tree-connects, lists the directory, then
+  creates a temporary file, reads it back and deletes it. It prints one line
+  per step and a verdict, and the exit status names the class: `10` connect,
+  `11` auth, `12` tree connect, `13` read probe, `14` write probe, `2` usage.
+- **Credentials come from two places only**: `--credentials-file PATH`
+  (mount.cifs format: `username=`, `password=`, `domain=`; refused unless the
+  file is yours and mode `0600` or stricter) or `--credential NAME`, which reads
+  `$CREDENTIALS_DIRECTORY/NAME` (systemd `LoadCredentialEncrypted=`). There is
+  no flag and no environment variable that carries a password. **Not on
+  Windows yet**: the mode and owner check has no Windows ACL equivalent, so the
+  client refuses every credentials file there rather than read one unchecked.
+- NTLMv2, signing required, SMB 3.1.1 offered first, encrypted when the server
+  asks. Authentication is an interface (`client.Authenticator`); Kerberos plugs
+  in there.
+- Everything a server names is bounded: directory entries, walk size and depth,
+  volume sizes (overflow refused), names with separators or `..` dropped.
+
+The protocol engine is [`cloudsoda/go-smb2`](https://github.com/cloudsoda/go-smb2),
+the client this server is already tested against; the client package adds the
+safe name and credential handling, the bounds and the probe on top of it.
+
 ## Serving one from the command line
 
 The command lives in its own product now:

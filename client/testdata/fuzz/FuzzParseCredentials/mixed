@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("username=a\npassword=b=c d\n\r\n# x\ndomain=D")
