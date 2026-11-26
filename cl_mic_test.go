@@ -111,6 +111,51 @@ func TestClientNegTokenRespMIC(t *testing.T) {
 	}
 }
 
+// The server's final token carries a MIC the client's check accepts, for both
+// the key-exchange and the plain NTLM signing, and not one for the other.
+func TestServerAcceptTokenCarriesAMICTheClientChecks(t *testing.T) {
+	key := bytes.Repeat([]byte{5}, 16)
+	for _, kx := range []bool{true, false} {
+		var flags uint32
+		if kx {
+			flags = ntlmNegotiateKeyExchange
+		}
+		mic, err := negTokenRespMIC(negTokenRespAcceptMIC(key, flags))
+		if err != nil || mic == nil {
+			t.Fatalf("kx=%v: %x %v", kx, mic, err)
+		}
+		n := &clNTLM{exported: key, keyExch: kx}
+		if !n.serverMICOK(mic, clMechTypes()) {
+			t.Errorf("kx=%v: the client refuses the server's MIC", kx)
+		}
+		n.keyExch = !kx
+		if n.serverMICOK(mic, clMechTypes()) {
+			t.Errorf("kx=%v: accepted under the other signing mode", kx)
+		}
+	}
+}
+
+// FuzzClientNegTokenRespMIC: whatever the server sends, parsing the final token
+// never panics, and a MIC it returns lies inside the input.
+func FuzzClientNegTokenRespMIC(f *testing.F) {
+	mic := bytes.Repeat([]byte{9}, 16)
+	f.Add(spnegoRespToken([]byte("NTLMSSP"), mic))
+	f.Add(derCtx(1, derSeq(append(derCtx(0, derEnum(1)), derCtx(2, derOctet([]byte("t")))...))))
+	f.Add(derCtx(1, derSeq([]byte{0xA3, 0x20, 0x04})))
+	f.Add(derCtx(1, derSeq(derCtx(3, derSeq(nil)))))
+	f.Add([]byte{0xA1, 0x30})
+	f.Add([]byte(nil))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		got, err := negTokenRespMIC(b)
+		if err != nil && got != nil {
+			t.Fatalf("both a MIC and an error: %x %v", got, err)
+		}
+		if len(got) > len(b) {
+			t.Fatalf("a MIC of %d bytes out of %d", len(got), len(b))
+		}
+	})
+}
+
 // finalResponse is a SESSION_SETUP response signed with the key a client that
 // derived exported and pre would use.
 func finalResponse(t *testing.T, key []byte, status uint32, flags uint16, sec []byte) clResult {
@@ -156,6 +201,9 @@ func TestClientFinishSession(t *testing.T) {
 		"a broken token":    {finalResponse(t, key, 0, 0, []byte{0xA1, 0x30}), "SPNEGO"},
 		"a bad buffer":      {badBuffer(t, key), "outside"},
 		"neither the other": {finalResponse(t, key, 0, 0, derCtx(0, derSeq(nil))), "SPNEGO"},
+		// RFC 4178 section 5: a stripped MIC is refused, not tolerated
+		"no token":            {finalResponse(t, key, 0, 0, nil), "no mechListMIC"},
+		"a token without MIC": {finalResponse(t, key, 0, 0, derCtx(1, derSeq(derCtx(0, derEnum(0))))), "no mechListMIC"},
 	} {
 		c := conn(false)
 		err := c.finishSession(tc.r, nt, pre)
@@ -171,19 +219,19 @@ func TestClientFinishSession(t *testing.T) {
 		t.Errorf("a status error: %v", err)
 	}
 
-	// the good ones: with the server's MIC, with none, and with an empty token
-	for name, sec := range map[string][]byte{"with a MIC": goodTok, "without one": nil, "a token without a MIC": derCtx(1, derSeq(derCtx(0, derEnum(0))))} {
+	// the good one: with the server's MIC
+	{
 		c := conn(false)
-		if err := c.finishSession(finalResponse(t, key, 0, 0, sec), nt, pre); err != nil {
-			t.Fatalf("%s: %v", name, err)
+		if err := c.finishSession(finalResponse(t, key, 0, 0, goodTok), nt, pre); err != nil {
+			t.Fatal(err)
 		}
 		if !c.ready || !c.encrypted || c.enc == nil || c.dec == nil || !bytes.Equal(c.signKey, key) {
-			t.Errorf("%s: ready=%v encrypted=%v", name, c.ready, c.encrypted)
+			t.Errorf("ready=%v encrypted=%v", c.ready, c.encrypted)
 		}
 	}
 	// the two directions get two keys
 	c := conn(false)
-	if err := c.finishSession(finalResponse(t, key, 0, 0, nil), nt, pre); err != nil {
+	if err := c.finishSession(finalResponse(t, key, 0, 0, goodTok), nt, pre); err != nil {
 		t.Fatal(err)
 	}
 	probe := make([]byte, c.enc.NonceSize())
@@ -192,17 +240,17 @@ func TestClientFinishSession(t *testing.T) {
 	}
 	// plain traffic is allowed only where asked for and where the server did not demand encryption
 	c = conn(true)
-	if err := c.finishSession(finalResponse(t, key, 0, 0, nil), nt, pre); err != nil || c.encrypted {
+	if err := c.finishSession(finalResponse(t, key, 0, 0, goodTok), nt, pre); err != nil || c.encrypted {
 		t.Errorf("AllowUnencrypted: %v encrypted=%v", err, c.encrypted)
 	}
 	c = conn(true)
-	if err := c.finishSession(finalResponse(t, key, 0, sessionFlagEncryptData, nil), nt, pre); err != nil || !c.encrypted {
+	if err := c.finishSession(finalResponse(t, key, 0, sessionFlagEncryptData, goodTok), nt, pre); err != nil || !c.encrypted {
 		t.Errorf("a session the server encrypts: %v encrypted=%v", err, c.encrypted)
 	}
 	// no cipher negotiated: no keys, never encrypted
 	c = conn(false)
 	c.cipherID = cipherNone
-	if err := c.finishSession(finalResponse(t, key, 0, 0, nil), nt, pre); err != nil || c.encrypted || c.enc != nil || c.dec != nil || !c.ready {
+	if err := c.finishSession(finalResponse(t, key, 0, 0, goodTok), nt, pre); err != nil || c.encrypted || c.enc != nil || c.dec != nil || !c.ready {
 		t.Errorf("no cipher: %v", err)
 	}
 }

@@ -124,9 +124,13 @@ func negTokenRespChallenge(token []byte) []byte {
 			append(derCtx(1, derOID(oidNTLMSSP)), derCtx(2, derOctet(token))...)...)))
 }
 
-// negTokenRespAccept is the empty "and we are done" token.
-func negTokenRespAccept() []byte {
-	return derCtx(1, derSeq(derCtx(0, derEnum(0))))
+// negTokenRespAcceptMIC is negTokenRespAccept with the acceptor's mechListMIC
+// over the NTLM-only mechanism list this server offers ([MS-SPNG] 3.1.5.1), the
+// answer to the MIC the client sent: RFC 4178 section 5 has the exchange go both
+// ways, and a client that requires it refuses a final response without one.
+func negTokenRespAcceptMIC(sessionKey []byte, authFlags uint32) []byte {
+	mic := ntlmMIC(sessionKey, authFlags&ntlmNegotiateKeyExchange != 0, false, clMechTypes())
+	return derCtx(1, derSeq(append(derCtx(0, derEnum(0)), derCtx(3, derOctet(mic))...)))
 }
 
 // mechTokenOf digs the NTLM message out of whichever shape the client sent: a

@@ -163,7 +163,7 @@ func (c *ClientConn) fail(err error) {
 func (c *ClientConn) readLoop() {
 	defer close(c.done)
 	for {
-		frame, err := readFrameMax(c.nc, int(c.frameMax.Load()))
+		frame, err := readFrameBulk(c.nc, int(c.frameMax.Load()))
 		if err != nil {
 			c.fail(err)
 			return
@@ -244,6 +244,39 @@ func (c *ClientConn) deliver(p *clPending, h header, frame []byte, enc bool) err
 
 // ─── sending ─────────────────────────────────────────────────────────────────
 
+// clPendingPool keeps the pending-request records, each with its one-slot
+// channel, so a request costs no allocation for them.
+var clPendingPool = sync.Pool{New: func() any { return &clPending{ch: make(chan clResult, 1)} }}
+
+// clBufs is a freelist of request buffers: a READ's request is the same few
+// hundred bytes every time, and a channel of slices holds them without boxing.
+var clBufs = make(chan []byte, 32)
+
+const clBufMax = 1 << 20 // larger buffers are left to the collector
+
+// getBuf returns an empty buffer with room for n bytes.
+func getBuf(n int) []byte {
+	select {
+	case b := <-clBufs:
+		if cap(b) >= n {
+			return b[:0]
+		}
+	default:
+	}
+	return make([]byte, 0, n)
+}
+
+// putBuf returns a buffer nothing refers to any more.
+func putBuf(b []byte) {
+	if cap(b) == 0 || cap(b) > clBufMax {
+		return
+	}
+	select {
+	case clBufs <- b[:0]:
+	default:
+	}
+}
+
 func creditCharge(n int) uint16 { return uint16(max(1, (n+clChunk-1)/clChunk)) }
 
 // roundTrip sends one request and waits for its response. pre, when not nil, is
@@ -251,11 +284,14 @@ func creditCharge(n int) uint16 { return uint16(max(1, (n+clChunk-1)/clChunk)) }
 // response is folded into when it is not the last (or always, hashAll).
 func (c *ClientConn) roundTrip(ctx context.Context, cmd command, tid uint32, charge uint16, bodyB []byte, pre *[]byte, hashAll bool) (clResult, error) {
 	cost := max(int(charge), 1)
-	stop := context.AfterFunc(ctx, func() { c.mu.Lock(); c.cond.Broadcast(); c.mu.Unlock() })
-	defer stop()
 	c.mu.Lock()
-	for c.err == nil && ctx.Err() == nil && c.credits < cost {
-		c.cond.Wait()
+	if c.err == nil && ctx.Err() == nil && c.credits < cost {
+		// only a request that has to wait asks to be woken when its context ends
+		stop := context.AfterFunc(ctx, func() { c.mu.Lock(); c.cond.Broadcast(); c.mu.Unlock() })
+		for c.err == nil && ctx.Err() == nil && c.credits < cost {
+			c.cond.Wait()
+		}
+		stop() // does not wait for the function, so c.mu may be held
 	}
 	if c.err != nil {
 		err := c.err
@@ -271,12 +307,15 @@ func (c *ClientConn) roundTrip(ctx context.Context, cmd command, tid uint32, cha
 	c.nextID += uint64(cost)
 	sid := c.sid
 	protect := c.ready && cmd != cmdNegotiate && cmd != cmdSessionSetup
-	p := &clPending{cmd: cmd, ch: make(chan clResult, 1), verify: protect && !c.encrypted, wantEnc: protect && c.encrypted}
+	p := clPendingPool.Get().(*clPending)
+	p.cmd, p.verify, p.wantEnc, p.interim = cmd, protect && !c.encrypted, protect && c.encrypted, 0
 	c.pending[id] = p
 	enc := c.enc
 	c.mu.Unlock()
 
-	frame := make([]byte, 4+headerLen, 4+headerLen+len(bodyB))
+	plain := getBuf(4 + headerLen + len(bodyB))
+	defer func() { putBuf(plain) }()
+	frame := append(plain, make([]byte, 4+headerLen)...)
 	msg := frame[4:]
 	copy(msg, protocolID[:])
 	binary.LittleEndian.PutUint16(msg[offStructSize:], headerLen)
@@ -293,6 +332,7 @@ func (c *ClientConn) roundTrip(ctx context.Context, cmd command, tid uint32, cha
 	switch {
 	case p.wantEnc:
 		frame = c.seal(enc, sid, msg)
+		defer putBuf(frame)
 	case p.verify:
 		signMessage(c.sigAlg, c.signKey, msg)
 	}
@@ -308,6 +348,9 @@ func (c *ClientConn) roundTrip(ctx context.Context, cmd command, tid uint32, cha
 	}
 	select {
 	case r := <-p.ch:
+		// the one answer a pending request gets has come: nothing else can
+		// reach it, so it serves the next request
+		clPendingPool.Put(p)
 		if r.err == nil && pre != nil && (hashAll || r.h.status == statusMoreProcessing) {
 			*pre = preauthExtend(*pre, r.msg)
 		}
@@ -323,7 +366,7 @@ func (c *ClientConn) roundTrip(ctx context.Context, cmd command, tid uint32, cha
 // seal builds the frame of an encrypted message: length, TRANSFORM_HEADER, the
 // ciphertext. The tag goes in the header's Signature field ([MS-SMB2] 2.2.41).
 func (c *ClientConn) seal(enc cipher.AEAD, sid uint64, plain []byte) []byte {
-	out := make([]byte, 4+transformLen, 4+transformLen+len(plain)+enc.Overhead())
+	out := append(getBuf(4+transformLen+len(plain)+enc.Overhead()), make([]byte, 4+transformLen)...)
 	t := out[4:]
 	copy(t, transformProtocolID[:])
 	binary.LittleEndian.PutUint64(t[offTrNonce:], c.nonces.Add(1))
@@ -457,14 +500,24 @@ func (c *ClientConn) finishSession(r clResult, nt *clNTLM, pre []byte) error {
 	if !verifyMessage(c.sigAlg, key, r.msg) {
 		return errors.New("smb: the final SESSION_SETUP response is not correctly signed")
 	}
+	// RFC 4178 section 5 makes the mechListMIC optional only when the accepted
+	// mechanism is the most preferred of BOTH sides and the mechanism offers no
+	// integrity; otherwise "MIC tokens MUST be exchanged". This client offers
+	// NTLMSSP alone and negotiates NTLM signing, and it sent its own MIC
+	// ([MS-SPNG] 3.1.5.1), so a final response without the server's is a
+	// stripped one: refused, the same as a wrong one.
+	var mic []byte
 	if len(secBuf) > 0 {
-		mic, err := negTokenRespMIC(secBuf)
+		mic, err = negTokenRespMIC(secBuf)
 		if err != nil {
 			return err
 		}
-		if mic != nil && !nt.serverMICOK(mic, clMechTypes()) {
-			return errors.New("smb: the server's mechListMIC is wrong")
-		}
+	}
+	if mic == nil {
+		return errors.New("smb: the final SESSION_SETUP response has no mechListMIC (RFC 4178 section 5)")
+	}
+	if !nt.serverMICOK(mic, clMechTypes()) {
+		return errors.New("smb: the server's mechListMIC is wrong")
 	}
 	var enc, dec cipher.AEAD
 	if c.cipherID != cipherNone {

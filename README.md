@@ -238,11 +238,17 @@ dialect 0x311, AES-128-GCM, AES-128-GMAC signing interoperate.
 |---|---|---|
 | `du`, 100k files: mallocs | 257090 | 175078 |
 | `du`, 100k files: time (host loaded, indicative) | 8.9 s | 6.1 s |
-| read 256 MiB: mallocs | 1056 | 360495 |
-| read 256 MiB: time (host loaded, indicative) | 0.70 s | 4.28 s |
+| read 256 MiB: mallocs | 1057 | 997 |
+| read 256 MiB: time (host loaded, indicative) | 0.58 s | 0.35 s |
 
-Reads are sequential and unpipelined, so **large reads are slower**: that is an
-open defect, and the reason `client` still uses go-smb2. Frames are bounded by
+Reads are pipelined: `io.Copy` reaches `WriteTo`, which keeps four READs of up
+to MaxReadSize in flight on the granted credits, and frames, plain messages and
+pending slots are pooled (the earlier sequential version made one synchronous
+round trip per 8 KiB `io.Discard` read, 360 k mallocs). The read row is 3
+interleaved rounds at host load about 9, so times are indicative; the `du` rows
+are from the earlier run and were not repeated. `client` still uses go-smb2.
+The server's final SESSION_SETUP response must carry its mechListMIC (RFC 4178
+section 5): a stripped one is refused. Frames are bounded by
 the negotiated size, credits, interim responses, directory entries and idle
 batches; go-smb2 allocates up to 16 MiB from the frame's own length field.
 

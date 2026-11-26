@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"sync"
 	"time"
 )
 
@@ -172,33 +173,138 @@ func (s *ClientShare) Open(ctx context.Context, p string) (*ClientFile, error) {
 // Size is the length the server reported at open.
 func (f *ClientFile) Size() int64 { return f.size }
 
-// ReadAt fills p from offset off, one READ per negotiated chunk. A READ may
-// never return more than was asked: that is a server writing past our buffer.
+// A large read is cut into pieces of clReadChunk, clReadWindow of them in flight
+// at once: the credits the server granted pay for them, and one round trip no
+// longer stands between two pieces.
+const (
+	clReadChunk  = 2 << 20
+	clReadWindow = 4
+)
+
+// chunk is the size of one pipelined piece: never more than the server's
+// MaxReadSize.
+func (f *ClientFile) chunk() int {
+	if m := int(f.s.c.maxRead); m > 0 {
+		return min(clReadChunk, m)
+	}
+	return clReadChunk
+}
+
+// fetch reads want bytes at off, and fewer only at the end of the file. A READ
+// may never return more than was asked (parseReadResp refuses it): that is a
+// server writing past our buffer.
+func (f *ClientFile) fetch(ctx context.Context, off int64, want int) ([]byte, error) {
+	var out []byte
+	for len(out) < want {
+		n := uint32(min(want-len(out), int(f.s.c.maxRead)))
+		r, err := f.s.rt(ctx, cmdRead, creditCharge(int(n)), clReadRequest(f.id, uint64(off)+uint64(len(out)), n), "READ")
+		if err != nil {
+			var se *StatusError
+			if errors.As(err, &se) && se.Status == statusEndOfFile {
+				return out, nil
+			}
+			return out, err
+		}
+		data, err := parseReadResp(r.msg, n)
+		if err != nil {
+			return out, err
+		}
+		if len(data) == 0 {
+			return out, nil
+		}
+		if out == nil && len(data) == want {
+			return data, nil
+		}
+		out = append(out, data...)
+	}
+	return out, nil
+}
+
+// ReadAt fills p from offset off, with the pieces of a large p read
+// concurrently. It returns io.EOF when the file ends before p is full.
 func (f *ClientFile) ReadAt(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, fs.ErrInvalid
 	}
+	size := f.chunk()
+	pieces := (len(p) + size - 1) / size
+	got := make([]int, pieces)
+	errs := make([]error, pieces)
+	slot := make(chan struct{}, clReadWindow)
+	var wg sync.WaitGroup
+	for i := range pieces {
+		lo, hi := i*size, min((i+1)*size, len(p))
+		slot <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer func() { <-slot; wg.Done() }()
+			data, err := f.fetch(f.ctx, off+int64(lo), hi-lo)
+			got[i], errs[i] = copy(p[lo:hi], data), err
+		}()
+	}
+	wg.Wait()
 	n := 0
-	for n < len(p) {
-		want := uint32(min(len(p)-n, int(f.s.c.maxRead)))
-		r, err := f.s.rt(f.ctx, cmdRead, creditCharge(int(want)), clReadRequest(f.id, uint64(off)+uint64(n), want), "READ")
-		if err != nil {
-			var se *StatusError
-			if errors.As(err, &se) && se.Status == statusEndOfFile {
-				return n, io.EOF
-			}
-			return n, err
+	for i := range pieces {
+		n += got[i]
+		if errs[i] != nil {
+			return n, errs[i]
 		}
-		data, err := parseReadResp(r.msg, want)
-		if err != nil {
-			return n, err
-		}
-		if len(data) == 0 {
+		if got[i] < min(size, len(p)-i*size) {
 			return n, io.EOF
 		}
-		n += copy(p[n:], data)
 	}
 	return n, nil
+}
+
+// WriteTo copies the rest of the file to w with clReadWindow READs in flight,
+// which is what io.Copy uses instead of a round trip per buffer. Each piece is
+// written from the response it arrived in.
+func (f *ClientFile) WriteTo(w io.Writer) (int64, error) {
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	size := f.chunk()
+	type piece struct {
+		data []byte
+		err  error
+	}
+	var queue []chan piece
+	next := f.off
+	issue := func() {
+		ch, at := make(chan piece, 1), next
+		next += int64(size)
+		queue = append(queue, ch)
+		go func() {
+			data, err := f.fetch(ctx, at, size)
+			ch <- piece{data, err}
+		}()
+	}
+	for range clReadWindow {
+		issue()
+	}
+	var total int64
+	for len(queue) > 0 {
+		r := <-queue[0]
+		queue = queue[1:]
+		if len(r.data) > 0 {
+			n, err := w.Write(r.data)
+			total += int64(n)
+			f.off += int64(n)
+			if err != nil {
+				return total, err
+			}
+			if n < len(r.data) {
+				return total, io.ErrShortWrite
+			}
+		}
+		if r.err != nil {
+			return total, r.err
+		}
+		if len(r.data) < size {
+			return total, nil
+		}
+		issue()
+	}
+	return total, nil
 }
 
 func (f *ClientFile) Read(p []byte) (int, error) {
