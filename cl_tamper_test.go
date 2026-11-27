@@ -2,10 +2,12 @@ package smb_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	fssmb "github.com/go-filesystems/smb"
 )
@@ -80,11 +82,15 @@ func TestTheOwnClientEngineRefusesATamperedResponse(t *testing.T) {
 			t.Fatal(err)
 		}
 		armed.Store(true)
-		if st, err := sh.Stat(context.Background(), "a.txt"); err == nil {
-			t.Fatalf("plain=%v: a tampered response was accepted: %+v", plain, st)
+		// the refusal must come from the connection ending, not from a caller
+		// giving up on a reader that went on waiting
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if st, err := sh.Stat(ctx, "a.txt"); err == nil || errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("plain=%v: a tampered response: %+v, %v", plain, st, err)
 		}
-		if _, err := sh.Stat(context.Background(), "a.txt"); err == nil {
-			t.Fatalf("plain=%v: the connection survived a tampered response", plain)
+		if _, err := sh.Stat(ctx, "a.txt"); err == nil || errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("plain=%v: the connection survived a tampered response: %v", plain, err)
 		}
+		cancel()
 	}
 }
