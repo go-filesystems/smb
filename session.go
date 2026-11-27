@@ -154,7 +154,7 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 			}
 			var done []byte
 			if ex.spnego {
-				done = negTokenRespAccept()
+				done = negTokenRespAcceptMIC(key, auth.flags)
 			}
 			reply := c.sessionSetupResponse(h, statusSuccess, flags, done)
 			signMessage(c.signAlgo(), reauth.signingKey, reply)
@@ -168,7 +168,7 @@ func (c *conn) sessionSetup(h header, body, msg []byte) ([]byte, error) {
 		}
 		var done []byte
 		if ex.spnego {
-			done = negTokenRespAccept()
+			done = negTokenRespAcceptMIC(key, auth.flags)
 		}
 		return c.establishSession(h, auth.user, key, nil, preauth, time.Time{}, done)
 

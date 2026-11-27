@@ -25,7 +25,24 @@ const (
 )
 
 // readFrame returns one message body, without its length header.
-func readFrame(r io.Reader) ([]byte, error) {
+func readFrame(r io.Reader) ([]byte, error) { return readFrameMax(r, maxMessageLen) }
+
+// readFrameMax is readFrame with the bound given by the caller: the client
+// engine learns a smaller one from the negotiate and refuses a server that
+// exceeds it.
+func readFrameMax(r io.Reader, maxLen int) ([]byte, error) {
+	return readFrameGrow(r, maxLen, false)
+}
+
+// readFrameBulk is readFrameMax for a connection whose bound is a size the
+// client itself agreed in the negotiate: the buffer is allocated once at the
+// announced length (never above maxLen) instead of doubling, and copying, its
+// way up to a 1 MiB READ.
+func readFrameBulk(r io.Reader, maxLen int) ([]byte, error) {
+	return readFrameGrow(r, maxLen, true)
+}
+
+func readFrameGrow(r io.Reader, maxLen int, bulk bool) ([]byte, error) {
 	var hdr [frameHeaderLen]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return nil, err
@@ -37,14 +54,21 @@ func readFrame(r io.Reader) ([]byte, error) {
 	if n == 0 {
 		return nil, fmt.Errorf("smb: empty message")
 	}
-	if n > maxMessageLen {
-		return nil, fmt.Errorf("smb: message of %d bytes is larger than the %d-byte limit", n, maxMessageLen)
+	if n > maxLen {
+		return nil, fmt.Errorf("smb: message of %d bytes is larger than the %d-byte limit", n, maxLen)
 	}
 	// The buffer follows the bytes that arrive, doubling at most, rather than
 	// the length the header announces: four bytes saying 8 MiB used to cost
 	// 8 MiB at once, before any authentication, for as long as the client
 	// then kept quiet.
-	body := make([]byte, 0, min(n, frameFirstRead))
+	first := min(n, frameFirstRead)
+	if bulk {
+		// one allocation: maxLen is already the size the client agreed to, and
+		// the room after it takes the AEAD tag a transform header carries
+		// elsewhere, so decrypting needs no copy of the whole frame
+		first = n + frameTagRoom
+	}
+	body := make([]byte, 0, first)
 	for len(body) < n {
 		if len(body) == cap(body) {
 			body = slices.Grow(body, min(n-len(body), len(body)))
@@ -62,6 +86,10 @@ func readFrame(r io.Reader) ([]byte, error) {
 // frameFirstRead is what a frame's buffer starts at: every message but a
 // large READ or WRITE fits.
 const frameFirstRead = 64 << 10
+
+// frameTagRoom is the capacity a bulk frame keeps past its end: an AEAD tag is
+// 16 bytes for every cipher SMB 3.1.1 negotiates.
+const frameTagRoom = 16
 
 // writeFrame writes one message body with its length header. The two are sent
 // as ONE write: a client that reads the header and then blocks on a body that

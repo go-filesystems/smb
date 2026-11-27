@@ -223,6 +223,36 @@ client this server is already tested against) with `Negotiator.RequireEncryption
 added, which is proposed upstream; the client package adds the
 safe name and credential handling, the bounds and the probe on top of it.
 
+### An in-house engine (experimental, not wired into `client`)
+
+`ClientConn` (`cl_*.go`) is a first increment of an engine of our own:
+SMB 3.1.1 only, negotiate with preauth integrity, encryption and signing
+contexts, NTLMv2 with the SPNEGO mechListMIC, tree connect, create, query-info,
+query-directory, read, close. **Encryption is required** unless
+`ClientOptions.AllowUnencrypted` is set. It was measured against go-smb2 with a
+throwaway harness (not in this repository: it is a measuring tool, with no
+guard tests) against Samba 4.22 in a container, `smb encrypt = required`:
+dialect 0x311, AES-128-GCM, AES-128-GMAC signing interoperate.
+
+| One round, Samba 4.22, encrypted | go-smb2 (v0.19.0) | own engine |
+|---|---|---|
+| `du`, 100k files: mallocs | 257090 | 175078 |
+| `du`, 100k files: time (host loaded, indicative) | 8.9 s | 6.1 s |
+| read 256 MiB: mallocs | 1057 | 997 |
+| read 256 MiB: time (host loaded, indicative) | 0.58 s | 0.35 s |
+
+Reads are pipelined: `io.Copy` reaches `WriteTo`, which keeps four READs of up
+to MaxReadSize in flight on the granted credits, and frames, plain messages and
+pending slots are pooled (the earlier sequential version made one synchronous
+round trip per 8 KiB `io.Discard` read, 360 k mallocs). The read row is 3
+interleaved rounds at host load about 9, so times are indicative (re-measurement
+deferred: host load 34-41 on 2026-11-27 17:05); the `du` rows
+are from the earlier run and were not repeated. `client` still uses go-smb2.
+The server's final SESSION_SETUP response must carry its mechListMIC (RFC 4178
+section 5): a stripped one is refused. Frames are bounded by
+the negotiated size, credits, interim responses, directory entries and idle
+batches; go-smb2 allocates up to 16 MiB from the frame's own length field.
+
 ## Serving one from the command line
 
 The command lives in its own product now:
