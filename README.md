@@ -245,7 +245,8 @@ Reads are pipelined: `io.Copy` reaches `WriteTo`, which keeps four READs of up
 to MaxReadSize in flight on the granted credits, and frames, plain messages and
 pending slots are pooled (the earlier sequential version made one synchronous
 round trip per 8 KiB `io.Discard` read, 360 k mallocs). The read row is 3
-interleaved rounds at host load about 9, so times are indicative; the `du` rows
+interleaved rounds at host load about 9, so times are indicative (re-measurement
+deferred: host load 34-41 on 2026-11-27 17:05); the `du` rows
 are from the earlier run and were not repeated. `client` still uses go-smb2.
 The server's final SESSION_SETUP response must carry its mechListMIC (RFC 4178
 section 5): a stripped one is refused. Frames are bounded by
