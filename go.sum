@@ -5,8 +5,8 @@ github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSs
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/geoffgarside/ber v1.1.0 h1:qTmFG4jJbwiSzSXoNJeHcOprVzZ8Ulde2Rrrifu5U9w=
 github.com/geoffgarside/ber v1.1.0/go.mod h1:jVPKeCbj6MvQZhwLYsGwaGI52oUorHoHKNecGT85ZCc=
-github.com/go-filesystems/go-smb2 v0.1.0 h1:ymcTop43ZUMarBeuwDKZbdBRLYANkAabTTRcK/yr6+U=
-github.com/go-filesystems/go-smb2 v0.1.0/go.mod h1:SWukSkyWS4cWsKdR6f4RL5lPSJ2dmcr+ufKcdbntbfk=
+github.com/go-filesystems/go-smb2 v0.1.1 h1:Zs3iUWdWYkFRtaR65d7qCaIFSKLjldzAXd3bAU//isc=
+github.com/go-filesystems/go-smb2 v0.1.1/go.mod h1:SWukSkyWS4cWsKdR6f4RL5lPSJ2dmcr+ufKcdbntbfk=
 github.com/go-filesystems/hostcopy v0.1.0 h1:eNOy7iGrEe7dGZQ+UhnXJraZsnT+Ht3pP3OIWy69Wq0=
 github.com/go-filesystems/hostcopy v0.1.0/go.mod h1:5HPox1vd9HgHm4tzbem2w3a/QxmM0gyxhFQmKBKMrKI=
 github.com/go-filesystems/inflight v0.6.0 h1:6JoAXtIJD5X2ewj/wf7ZuIrTgoab01VTRXgo6wlpk5o=
