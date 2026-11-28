@@ -30,11 +30,11 @@ go 1.27.4
 require (
 	github.com/go-filesystems/go-smb2 v0.1.1
 	github.com/go-filesystems/hostcopy v0.1.0
-	github.com/go-filesystems/inflight v0.6.0
+	github.com/go-filesystems/inflight v0.7.0
 	github.com/go-filesystems/interface v0.6.0
 	github.com/jcmturner/gofork v1.7.6
 	github.com/jcmturner/gokrb5/v8 v8.4.4
-	github.com/quic-go/quic-go v0.64.1
+	github.com/quic-go/quic-go v0.66.0
 	github.com/spf13/cobra v1.10.2
 )
 
